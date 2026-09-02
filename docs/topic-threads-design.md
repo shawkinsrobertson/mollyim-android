@@ -486,3 +486,43 @@ Given the scope, this is not a single PR:
 3. **Phase 3 — backup v2 integration.** §8.
 4. **Phase 4 — polish & the open questions in §9**, plus real Molly↔Molly
    multi-device testing.
+
+## 11. Unrelated pre-existing issue noticed during Phase 1 testing (release blocker, not a topic-threads issue)
+
+Not caused by, or specific to, topic threads — noting it here only because
+it was surfaced while building/testing this feature and needs to be fixed
+before this fork goes to an app store.
+
+Building a debug APK on 2026-09-02 produced a 16 KB page-size compatibility
+warning:
+
+```
+is not compatible with 16 KB devices. Some libraries have LOAD segments not aligned at 16 KB boundaries:
+lib/arm64-v8a/libargon2.so
+lib/arm64-v8a/libnative-utils.so
+lib/x86_64/libargon2.so
+lib/x86_64/libnative-utils.so
+```
+
+- **Source**: both are prebuilt native libraries pulled in as Maven/AAR
+  dependencies, not built from source in this repo:
+  `im.molly:argon2:13.1-1` and `im.molly:native-utils:1.0.0`
+  (`app/build.gradle.kts` / `gradle/libs.versions.toml`). Whoever built
+  those `.so` files linked them with the older default 4 KB page
+  alignment, before 16 KB alignment became a Google Play requirement.
+- **Not currently blocking**: this is a compatibility *warning*, not a
+  build failure — the debug APK still builds and installs on today's
+  devices/emulators, which mostly still use 4 KB pages. It only becomes a
+  real problem for (a) devices that already enforce 16 KB pages (a small,
+  growing set of newer hardware), and (b) **Google Play submissions of
+  apps targeting Android 15+, required starting November 1, 2025.**
+- **Why it can't be fixed from this repo**: the `.so` files ship
+  pre-linked inside those two published `im.molly` artifacts. Repackaging
+  the APK locally can't relink an already-built shared library's internal
+  segment alignment — that requires recompiling `argon2`/`native-utils`
+  from source with 16 KB-aligned segments and republishing the artifacts.
+- **Action needed before any app-store submission**: either (a) check
+  whether newer versions of `im.molly:argon2`/`im.molly:native-utils`
+  already fix this upstream and bump the dependency versions, or (b) if
+  not, get the fix made upstream (recompile + republish those two
+  packages) before submitting.
