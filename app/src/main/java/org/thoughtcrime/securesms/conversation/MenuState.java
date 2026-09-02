@@ -33,6 +33,7 @@ public final class MenuState {
   private final boolean unpinMessage;
   private final boolean starMessage;
   private final boolean unstarMessage;
+  private final boolean startTopic;
 
   private MenuState(@NonNull Builder builder) {
     forward        = builder.forward;
@@ -50,6 +51,7 @@ public final class MenuState {
     unpinMessage   = builder.unpinMessage;
     starMessage    = builder.starMessage;
     unstarMessage  = builder.unstarMessage;
+    startTopic     = builder.startTopic;
   }
 
   public boolean shouldShowForwardAction() {
@@ -110,6 +112,10 @@ public final class MenuState {
 
   public boolean shouldShowUnstarMessage() {
     return unstarMessage;
+  }
+
+  public boolean shouldShowStartTopicAction() {
+    return startTopic;
   }
 
   public static MenuState getMenuState(@NonNull Recipient conversationRecipient,
@@ -266,6 +272,7 @@ public final class MenuState {
                   .shouldShowUnpinMessage(canUnpinMessage)
                   .shouldShowStarMessage(canStarMessage)
                   .shouldShowUnstarMessage(canUnstarMessage)
+                  .shouldShowStartTopicAction(!actionMessage && !hasInMemory && onlyContainsCompleteMessages(selectedParts))
                   .build();
   }
 
@@ -316,6 +323,7 @@ public final class MenuState {
     private boolean unpinMessage;
     private boolean starMessage;
     private boolean unstarMessage;
+    private boolean startTopic;
 
     @NonNull Builder shouldShowForwardAction(boolean forward) {
       this.forward = forward;
@@ -389,6 +397,11 @@ public final class MenuState {
 
     @NonNull Builder shouldShowUnstarMessage(boolean unstarMessage) {
       this.unstarMessage = unstarMessage;
+      return this;
+    }
+
+    @NonNull Builder shouldShowStartTopicAction(boolean startTopic) {
+      this.startTopic = startTopic;
       return this;
     }
 

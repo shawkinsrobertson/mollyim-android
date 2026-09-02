@@ -109,6 +109,7 @@ import org.thoughtcrime.securesms.database.model.StoryResult
 import org.thoughtcrime.securesms.database.model.StoryType
 import org.thoughtcrime.securesms.database.model.StoryType.Companion.fromCode
 import org.thoughtcrime.securesms.database.model.StoryViewState
+import org.thoughtcrime.securesms.database.model.TopicMessage
 import org.thoughtcrime.securesms.database.model.TopicRecord
 import org.thoughtcrime.securesms.database.model.databaseprotos.AdminDeleteStatus
 import org.thoughtcrime.securesms.database.model.databaseprotos.BodyRangeList
@@ -1097,7 +1098,13 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
       READ to 1,
       NOTIFIED to 1,
       BODY to body,
-      TYPE to MessageTypes.TOPIC_UPDATE_TYPE,
+      // Deliberately NOT MessageTypes.TOPIC_UPDATE_TYPE here: that base type isn't recognized by
+      // MessageRecord.isUpdate()/ConversationUpdateItem yet, and inserting an unrecognized special
+      // type risks an "unsupported message" fallback we can't verify without a compile+run cycle.
+      // For now this renders as a normal sent text bubble (its BODY is genuinely readable); teaching
+      // the update-item renderer to render TopicUpdate as a proper system line is a follow-up.
+      // MESSAGE_EXTRAS.topicUpdate is still attached below so that follow-up has the data it needs.
+      TYPE to (MessageTypes.BASE_SENT_TYPE or MessageTypes.SECURE_MESSAGE_BIT or MessageTypes.PUSH_MESSAGE_BIT),
       THREAD_ID to threadId,
       MESSAGE_EXTRAS to messageExtras.encode()
     )
@@ -1178,6 +1185,105 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
     topics.recordSourceMessages(topic.id, sourceMessageIds)
 
     return topic
+  }
+
+  /**
+   * Renames an active topic and inserts the "renamed" notice. No-ops (returns
+   * false) if the topic doesn't exist or is already deleted.
+   */
+  fun renameTopic(threadId: Long, topicId: Long, newName: String): Boolean {
+    val topic = topics.getTopic(topicId) ?: return false
+    if (topic.isDeleted || topic.name == newName) return false
+
+    val renamed = topics.renameTopic(topicId, newName)
+    if (!renamed) return false
+
+    insertTopicUpdateMessage(threadId, topic.copy(name = newName), TopicUpdate.Kind.RENAMED, previousName = topic.name)
+    return true
+  }
+
+  /**
+   * Ends a topic: inserts the "deleted" notice in the parent timeline and
+   * tombstones the topic (see [TopicTable.deleteTopic] for why that's a
+   * tombstone, not a row delete). Per docs/topic-threads-design.md §7, the
+   * topic's message copies are left in place on disk (their FK just goes
+   * dangling-safe via ON DELETE SET NULL if the topic row itself is ever hard
+   * deleted) -- they simply stop being reachable through any active-topics
+   * query once the topic is tombstoned.
+   *
+   * Phase 1 note: the design doc's "Delete for me" vs "Delete for everyone"
+   * distinction is a wire-protocol/sync concern (§6.3/§7) that doesn't exist
+   * yet -- both currently perform this same local-only operation. The caller
+   * (the topic thread screen) still presents both options so the UI/UX is in
+   * place ahead of that phase landing.
+   */
+  fun endTopic(threadId: Long, topicId: Long): Boolean {
+    val topic = topics.getTopic(topicId) ?: return false
+    if (topic.isDeleted) return false
+
+    insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.DELETED)
+    return topics.deleteTopic(topicId)
+  }
+
+  /**
+   * Inserts a new message composed while inside a topic thread. Phase 1 note:
+   * this is a local-only insert (self as sender, immediately in the "sent"
+   * state) rather than a real network send -- there is no wire protocol yet
+   * for topic messages to reach other participants/devices (see
+   * docs/topic-threads-design.md §6, a later phase). It exists so the topic
+   * thread screen has something real to show while that phase is pending.
+   */
+  fun insertTopicTextMessage(threadId: Long, topicId: Long, body: String, timestamp: Long = System.currentTimeMillis()): MessageId {
+    val toRecipientId = threads.getRecipientIdForThreadId(threadId) ?: error("No recipient for thread $threadId")
+    val self = Recipient.self()
+
+    val values = contentValuesOf(
+      FROM_RECIPIENT_ID to self.id.serialize(),
+      FROM_DEVICE_ID to 1,
+      TO_RECIPIENT_ID to toRecipientId.serialize(),
+      DATE_RECEIVED to timestamp,
+      DATE_SENT to timestamp,
+      READ to 1,
+      NOTIFIED to 1,
+      BODY to body,
+      TYPE to (MessageTypes.BASE_SENT_TYPE or MessageTypes.SECURE_MESSAGE_BIT or MessageTypes.PUSH_MESSAGE_BIT),
+      THREAD_ID to threadId,
+      TOPIC_ID to topicId
+    )
+
+    val messageId = writableDatabase.withinTransaction { db ->
+      MessageId(db.insert(TABLE_NAME, null, values))
+    }
+
+    // Deliberately no threads.update() here -- topic-owned messages don't drive the parent
+    // chat's snippet/unread badge, per docs/topic-threads-design.md §4.3/§9.
+    notifyConversationListeners(threadId)
+
+    return messageId
+  }
+
+  /**
+   * All messages owned by a topic (see [TOPIC_ID]), oldest first. A minimal,
+   * self-contained query rather than routing through the general-purpose
+   * [MmsReader]/[MessageRecord] deserialization pipeline -- see
+   * docs/topic-threads-design.md and the Phase 1 PR notes for why that
+   * pipeline is deliberately left untouched for now.
+   */
+  fun getTopicMessages(topicId: Long): List<TopicMessage> {
+    return readableDatabase
+      .select(ID, FROM_RECIPIENT_ID, BODY, DATE_SENT)
+      .from(TABLE_NAME)
+      .where("$TOPIC_ID = ?", topicId)
+      .orderBy("$DATE_SENT ASC")
+      .run()
+      .readToList { cursor ->
+        TopicMessage(
+          id = cursor.requireLong(ID),
+          fromRecipientId = RecipientId.from(cursor.requireLong(FROM_RECIPIENT_ID)),
+          body = cursor.requireString(BODY) ?: "",
+          dateSent = cursor.requireLong(DATE_SENT)
+        )
+      }
   }
 
   // endregion Topic threads
@@ -5863,7 +5969,8 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
   fun getConversation(threadId: Long, offset: Long = 0, limit: Long = 0, dateReceiveOrderBy: String = "DESC", filterCollapsed: Boolean = false): Cursor {
     val limitStr: String = if (limit > 0 || offset > 0) "$offset, $limit" else ""
 
-    var query = "$THREAD_ID = ? AND $STORY_TYPE = ? AND $PARENT_STORY_ID <= ? AND $SCHEDULED_DATE = ? AND $LATEST_REVISION_ID IS NULL"
+    // $TOPIC_ID IS NULL: exclude topic-owned message copies from the parent timeline -- see docs/topic-threads-design.md §4.2/§4.3.
+    var query = "$THREAD_ID = ? AND $STORY_TYPE = ? AND $PARENT_STORY_ID <= ? AND $SCHEDULED_DATE = ? AND $LATEST_REVISION_ID IS NULL AND $TOPIC_ID IS NULL"
     val args = mutableListOf(threadId.toString(), 0.toString(), 0.toString(), (-1).toString())
 
     if (filterCollapsed) {

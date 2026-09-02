@@ -2,7 +2,9 @@ package org.thoughtcrime.securesms.conversation.v2
 
 import android.content.Context
 import android.content.DialogInterface
+import android.widget.EditText
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.app.DialogCompat
 import androidx.fragment.app.Fragment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -10,8 +12,11 @@ import org.signal.core.util.concurrent.SignalExecutors
 import org.signal.core.util.concurrent.SimpleTask
 import org.thoughtcrime.securesms.R
 import org.thoughtcrime.securesms.components.settings.app.AppSettingsActivity
+import org.thoughtcrime.securesms.conversation.topics.TopicThreadActivity
 import org.thoughtcrime.securesms.database.SignalDatabase
+import org.thoughtcrime.securesms.database.TopicTable
 import org.thoughtcrime.securesms.database.model.MessageRecord
+import org.thoughtcrime.securesms.database.model.TopicRecord
 import org.thoughtcrime.securesms.dependencies.AppDependencies
 import org.thoughtcrime.securesms.recipients.Recipient
 import org.thoughtcrime.securesms.sms.MessageSender
@@ -159,6 +164,86 @@ object ConversationDialogs {
           setNegativeButton(R.string.ConversationActivity_delete) { _, _ -> onDelete() }
         }
       }
+      .show()
+  }
+
+  /**
+   * Entry point for the conversation header's topics icon. Shows a picker
+   * over the chat's active topics (plus "New topic") if any exist, or goes
+   * straight to topic creation if this is the chat's first topic. See
+   * docs/topic-threads-design.md §3.
+   */
+  fun displayTopicsMenu(fragment: Fragment, threadId: Long) {
+    SimpleTask.run(
+      fragment.lifecycle,
+      { SignalDatabase.topics.getActiveTopicsForThread(threadId) },
+      { topics ->
+        if (topics.isEmpty()) {
+          displayCreateTopicDialog(fragment, threadId)
+        } else {
+          displayTopicPickerDialog(fragment, threadId, topics)
+        }
+      }
+    )
+  }
+
+  private fun displayTopicPickerDialog(fragment: Fragment, threadId: Long, topics: List<TopicRecord>) {
+    val context = fragment.requireContext()
+    val newTopicLabel = "+ " + context.getString(R.string.ConversationTopics__new_topic)
+    val items = (topics.map { it.name } + newTopicLabel).toTypedArray()
+
+    MaterialAlertDialogBuilder(context)
+      .setTitle(R.string.ConversationTopics__topics)
+      .setItems(items) { _, which ->
+        if (which < topics.size) {
+          context.startActivity(TopicThreadActivity.createIntent(context, threadId, topics[which].id))
+        } else {
+          displayCreateTopicDialog(fragment, threadId)
+        }
+      }
+      .setNegativeButton(android.R.string.cancel, null)
+      .show()
+  }
+
+  /**
+   * Prompts for a topic name and, on confirmation, creates it (optionally
+   * from [sourceMessageIds] selected via long-press) and opens it. See
+   * MessageTable.startTopic.
+   */
+  fun displayCreateTopicDialog(fragment: Fragment, threadId: Long, sourceMessageIds: Set<Long> = emptySet()) {
+    val context = fragment.requireContext()
+    val input = EditText(context)
+    input.hint = context.getString(R.string.ConversationTopics__topic_name_hint)
+
+    MaterialAlertDialogBuilder(context)
+      .setTitle(R.string.ConversationTopics__new_topic)
+      .setView(input)
+      .setPositiveButton(R.string.ConversationTopics__create) { _, _ ->
+        val name = input.text.toString().trim()
+        if (name.isEmpty()) {
+          Toast.makeText(context, R.string.ConversationTopics__topic_name_required, Toast.LENGTH_SHORT).show()
+          return@setPositiveButton
+        }
+
+        SimpleTask.run(
+          fragment.lifecycle,
+          {
+            try {
+              SignalDatabase.messages.startTopic(threadId, name, sourceMessageIds)
+            } catch (e: TopicTable.TooManyTopicsException) {
+              null
+            }
+          },
+          { topic: TopicRecord? ->
+            if (topic == null) {
+              Toast.makeText(context, R.string.ConversationTopics__too_many_topics, Toast.LENGTH_SHORT).show()
+            } else {
+              context.startActivity(TopicThreadActivity.createIntent(context, threadId, topic.id))
+            }
+          }
+        )
+      }
+      .setNegativeButton(android.R.string.cancel, null)
       .show()
   }
 }

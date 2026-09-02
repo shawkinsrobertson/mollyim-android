@@ -4643,6 +4643,8 @@
     <string name="conversation_selection__menu_star" translatable="false">Star (Labs)</string>
     <!-- Button to remove the star from a message; Action item -->
     <string name="conversation_selection__menu_unstar" translatable="false">Unstar (Labs)</string>
+    <!-- Button to start a topic thread from the selected message(s); Action item -->
+    <string name="conversation_selection__menu_start_topic" translatable="false">Start topic (Labs)</string>
     <!-- Button to forward a message to another person or group chat; Action item with hyphenation. Translation can use soft hyphen - Unicode U+00AD  -->
     <string name="conversation_selection__menu_forward">Forward</string>
     <!-- Button to reply to a message; Action item with hyphenation. Translation can use soft hyphen - Unicode U+00AD -->
@@ -9979,6 +9981,35 @@
     <string name="TopicThread__renamed_notice">📌 Topic renamed: %1$s → %2$s</string>
     <!-- Inline chat notice shown when a topic thread is deleted. %1$s is the topic name. -->
     <string name="TopicThread__deleted_notice">📌 Topic deleted: %1$s</string>
+
+    <!-- Title of the toolbar icon in a conversation that opens the topics menu -->
+    <string name="conversation__menu_topics">Topics</string>
+    <!-- Title of the dialog listing a chat\'s topics -->
+    <string name="ConversationTopics__topics">Topics</string>
+    <!-- List item / dialog title for creating a new topic -->
+    <string name="ConversationTopics__new_topic">New topic</string>
+    <!-- Hint text for the topic name input field -->
+    <string name="ConversationTopics__topic_name_hint">Topic name</string>
+    <!-- Button that creates a new topic -->
+    <string name="ConversationTopics__create">Create</string>
+    <!-- Toast shown when trying to create a topic without entering a name -->
+    <string name="ConversationTopics__topic_name_required">Enter a topic name</string>
+    <!-- Toast shown when a chat already has the maximum number of topics -->
+    <string name="ConversationTopics__too_many_topics">This chat already has the maximum number of topics</string>
+    <!-- Button that renames a topic -->
+    <string name="ConversationTopics__rename_topic">Rename topic</string>
+    <!-- Button that deletes a topic -->
+    <string name="ConversationTopics__delete_topic">Delete topic</string>
+    <!-- Title of the delete-topic confirmation dialog. %1$s is the topic name -->
+    <string name="ConversationTopics__delete_topic_question">Delete \"%1$s\"?</string>
+    <!-- Body of the delete-topic confirmation dialog -->
+    <string name="ConversationTopics__delete_topic_body">Messages in this topic won\'t be deleted from the chat.</string>
+    <!-- Button that deletes a topic only on this device -->
+    <string name="ConversationTopics__delete_for_me">Delete for me</string>
+    <!-- Button that deletes a topic for everyone in the chat -->
+    <string name="ConversationTopics__delete_for_everyone">Delete for everyone</string>
+    <!-- Hint text for the topic thread compose box -->
+    <string name="ConversationTopics__message_hint">Message</string>
 
     <!-- EOF -->
 </resources>
