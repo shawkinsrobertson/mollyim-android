@@ -19,8 +19,9 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import org.signal.core.util.concurrent.SimpleTask
+import kotlinx.coroutines.withContext
 import org.thoughtcrime.securesms.PassphraseRequiredActivity
 import org.thoughtcrime.securesms.R
 import org.thoughtcrime.securesms.components.recyclerview.SmoothScrollingLinearLayoutManager
@@ -111,11 +112,18 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
     // Resolved independently of the ViewModel's own (IO-dispatched) recipient lookup, so this
     // UI-setup work never risks running the DB lookup on the main thread -- see the "full parity"
     // design discussion for why this isn't shared state with the ViewModel.
-    SimpleTask.run(
-      lifecycle,
-      { SignalDatabase.threads.getRecipientForThreadId(threadId)!! },
-      { threadRecipient -> setUpConversationUi(threadRecipient, wallpaperView, wallpaperDimView) }
-    )
+    //
+    // Deliberately a plain coroutine rather than SimpleTask.run(lifecycle, ...): SimpleTask only
+    // invokes its tasks once the Lifecycle is already at least CREATED, but that transition is
+    // dispatched by the framework *after* onCreate() returns -- so calling it synchronously here
+    // (while still inside onCreate()) silently no-ops both the background and foreground task,
+    // and setUpConversationUi() (which is what wires up the message-rendering collector) never runs.
+    lifecycleScope.launch {
+      val threadRecipient = withContext(Dispatchers.IO) {
+        SignalDatabase.threads.getRecipientForThreadId(threadId)!!
+      }
+      setUpConversationUi(threadRecipient, wallpaperView, wallpaperDimView)
+    }
   }
 
   private fun setUpConversationUi(threadRecipient: Recipient, wallpaperView: ImageView, wallpaperDimView: View) {
