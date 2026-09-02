@@ -181,12 +181,21 @@ text message, making it the topic's **anchor message**.
 
 ## 6. Wire Protocol (`SignalService.proto`)
 
-Current next-free field numbers (checked directly against this repo):
-`DataMessage` → **30**, `SyncMessage.content` oneof → **27**,
-`ChatItem.item` oneof (backup) → **23**. Numbers below assume no other
-feature lands first.
+Per the §9 field-number-contention discussion, these fields deliberately do
+**not** use the next sequential slot (`DataMessage` → 30, `SyncMessage.content`
+→ 27, as of this repo today). Instead they claim a high, out-of-the-way band
+starting at **9001** — chosen to be far outside where Signal's own upstream
+development is actively assigning numbers, so a routine upstream merge is
+very unlikely to ever collide with it. This trades a couple of extra
+wire-format bytes per message (varint-encoded field tags above 15 need 2+
+bytes instead of 1) for structurally avoiding the race, rather than just
+re-checking for it before every release. `9001`/`9002` below are placeholders
+for "our reserved band, offset 1/2" — the exact starting number should be
+picked once and reused consistently for every Molly-only extension across
+the whole proto, not just this feature, so a follow-up feature doesn't have
+to invent its own scheme.
 
-### 6.1 `DataMessage.TopicContext` (new field 30)
+### 6.1 `DataMessage.TopicContext` (new field 9001)
 
 ```proto
 message TopicContext {
@@ -202,7 +211,7 @@ message TopicContext {
 }
 
 // on DataMessage:
-optional TopicContext topicContext = 30;
+optional TopicContext topicContext = 9001;
 ```
 
 - Sent **once** on the anchor message itself (body = the human-readable
@@ -229,10 +238,10 @@ optional TopicContext topicContext = 30;
   present "N replies" off one parent and avoids click-through chains on
   clients with no topic UI at all.
 
-### 6.2 Per-message topic tag (new field 31, `DataMessage.topicId`)
+### 6.2 Per-message topic tag (new field 9002, `DataMessage.topicId`)
 
 ```proto
-optional string topicId = 31; // set on every message sent inside a topic thread
+optional string topicId = 9002; // set on every message sent inside a topic thread
 ```
 
 A plain string rather than a submessage, kept separate from
@@ -240,7 +249,7 @@ A plain string rather than a submessage, kept separate from
 that a normal chat message doesn't need to build a `TopicContext` just to
 carry a topic id.
 
-### 6.3 Multi-device sync — `SyncMessage.TopicSync` (new field 27)
+### 6.3 Multi-device sync — `SyncMessage.TopicSync` (new field 9001)
 
 Topic lifecycle events need to reach the user's *other* devices even when
 no DataMessage would otherwise be sent to a peer (e.g. renaming a topic in
@@ -274,8 +283,13 @@ message TopicSync {
 }
 
 // on SyncMessage.content oneof:
-TopicSync topicSync = 27;
+TopicSync topicSync = 9001;
 ```
+
+(Field numbers are scoped per-message, so `SyncMessage.content`'s `9001`
+and `DataMessage`'s `9001` are unrelated and don't collide with each other
+— each message type just starts consuming the reserved band from its own
+first free slot.)
 
 Sent via the existing sync-message channel (same delivery path as
 `DeleteForMe`) any time a topic is created, renamed, or deleted, regardless
@@ -403,11 +417,15 @@ gap rather than an oversight.
    just "re-verify the number right before shipping" (still necessary,
    but not sufficient on its own):
    - Re-verify next-free numbers immediately before each implementation PR.
-   - **Consider claiming a deliberately high, out-of-the-way field-number
-     band (e.g. 9000+) for all Molly-only extensions**, instead of
-     competing for the next sequential slot Signal's own devs are actively
-     filling in. Costs a couple extra wire-format bytes per message;
-     structurally avoids the race instead of just re-checking for it.
+   - **Claim a deliberately high, out-of-the-way field-number band (9000+)
+     for all Molly-only extensions**, instead of competing for the next
+     sequential slot Signal's own devs are actively filling in. §6 now does
+     this (`DataMessage`/`SyncMessage` fields start at 9001). Costs a
+     couple extra wire-format bytes per message; structurally avoids the
+     race instead of just re-checking for it. Worth adopting for §8's
+     backup-proto fields too when that phase is implemented, for the same
+     reason — not yet applied there since backup wasn't in scope for this
+     round of edits.
 2. **`BASE_TYPE_MASK` headroom.** Only 4 values remain free (19, 29, 30, 31)
    in the 5-bit base-type space system-wide, not just for this feature —
    and unlike the wire-protocol numbers above, there's no "pick a high
