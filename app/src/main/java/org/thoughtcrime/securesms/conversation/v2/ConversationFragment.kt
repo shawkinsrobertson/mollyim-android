@@ -2790,6 +2790,16 @@ class ConversationFragment :
       )
     }
 
+    if (menuState.shouldShowStartTopicAction()) {
+      items.add(
+        ActionItem(R.drawable.symbol_list_bullet_24, resources.getString(R.string.conversation_selection__menu_start_topic)) {
+          val sourceMessageIds = selectedParts.map { it.conversationMessage.messageRecord.id }.toSet()
+          finishActionMode()
+          ConversationDialogs.displayCreateTopicDialog(this, args.threadId, sourceMessageIds)
+        }
+      )
+    }
+
     bottomActionBar.setItems(items)
     setBottomActionBarVisibility(true)
   }
@@ -4238,6 +4248,10 @@ class ConversationFragment :
       CommunicationActions.startVoiceCall(this@ConversationFragment, recipient) {
         YouAreAlreadyInACallSnackbar.show(requireView())
       }
+    }
+
+    override fun handleTopics() {
+      ConversationDialogs.displayTopicsMenu(this@ConversationFragment, args.threadId)
     }
 
     override fun handleViewMedia() {

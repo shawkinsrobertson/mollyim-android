@@ -51,6 +51,7 @@ public interface MessageTypes {
   long THREAD_MERGE_TYPE                     = 16;
   long SMS_EXPORT_TYPE                       = 17;
   long SESSION_SWITCHOVER_TYPE               = 18;
+  long TOPIC_UPDATE_TYPE                     = 19;
 
   long BASE_INBOX_TYPE                    = 20;
   long BASE_OUTBOX_TYPE                   = 21;

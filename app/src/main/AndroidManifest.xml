@@ -615,6 +615,12 @@
             android:theme="@style/Theme.Signal.DayNight.NoActionBar" />
 
         <activity
+            android:name=".conversation.topics.TopicThreadActivity"
+            android:exported="false"
+            android:windowSoftInputMode="stateHidden"
+            android:theme="@style/Theme.Signal.DayNight.NoActionBar" />
+
+        <activity
             android:name=".logsubmit.SubmitDebugLogActivity"
             android:configChanges="touchscreen|keyboard|keyboardHidden|orientation|screenLayout|screenSize"
             android:exported="false"

@@ -67,6 +67,7 @@ import org.signal.core.util.toSingleLine
 import org.signal.core.util.update
 import org.signal.core.util.withinTransaction
 import org.signal.libsignal.protocol.IdentityKey
+import org.thoughtcrime.securesms.R
 import org.thoughtcrime.securesms.attachments.Attachment
 import org.thoughtcrime.securesms.attachments.DatabaseAttachment
 import org.thoughtcrime.securesms.attachments.DatabaseAttachment.DisplayOrderComparator
@@ -88,6 +89,7 @@ import org.thoughtcrime.securesms.database.SignalDatabase.Companion.reactions
 import org.thoughtcrime.securesms.database.SignalDatabase.Companion.recipients
 import org.thoughtcrime.securesms.database.SignalDatabase.Companion.storySends
 import org.thoughtcrime.securesms.database.SignalDatabase.Companion.threads
+import org.thoughtcrime.securesms.database.SignalDatabase.Companion.topics
 import org.thoughtcrime.securesms.database.documents.Document
 import org.thoughtcrime.securesms.database.documents.IdentityKeyMismatch
 import org.thoughtcrime.securesms.database.documents.IdentityKeyMismatchSet
@@ -107,6 +109,8 @@ import org.thoughtcrime.securesms.database.model.StoryResult
 import org.thoughtcrime.securesms.database.model.StoryType
 import org.thoughtcrime.securesms.database.model.StoryType.Companion.fromCode
 import org.thoughtcrime.securesms.database.model.StoryViewState
+import org.thoughtcrime.securesms.database.model.TopicMessage
+import org.thoughtcrime.securesms.database.model.TopicRecord
 import org.thoughtcrime.securesms.database.model.databaseprotos.AdminDeleteStatus
 import org.thoughtcrime.securesms.database.model.databaseprotos.BodyRangeList
 import org.thoughtcrime.securesms.database.model.databaseprotos.DecryptedGroupV2Context
@@ -120,6 +124,7 @@ import org.thoughtcrime.securesms.database.model.databaseprotos.PollTerminate
 import org.thoughtcrime.securesms.database.model.databaseprotos.ProfileChangeDetails
 import org.thoughtcrime.securesms.database.model.databaseprotos.SessionSwitchoverEvent
 import org.thoughtcrime.securesms.database.model.databaseprotos.ThreadMergeEvent
+import org.thoughtcrime.securesms.database.model.databaseprotos.TopicUpdate
 import org.thoughtcrime.securesms.dependencies.AppDependencies
 import org.thoughtcrime.securesms.groups.GroupMigrationMembershipChange
 import org.thoughtcrime.securesms.jobs.OptimizeMessageSearchIndexJob
@@ -230,6 +235,7 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
     const val STARRED = "starred"
     const val COLLAPSED_STATE = "collapsed_state"
     const val COLLAPSED_HEAD_ID = "collapsed_head_id"
+    const val TOPIC_ID = "topic_id"
 
     const val QUOTE_NOT_PRESENT_ID = 0L
     const val QUOTE_TARGET_MISSING_ID = -1L
@@ -305,7 +311,8 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
         $STORY_ARCHIVED INTEGER DEFAULT 0,
         $STARRED INTEGER DEFAULT 0,
         $COLLAPSED_STATE INTEGER DEFAULT 0,
-        $COLLAPSED_HEAD_ID INTEGER DEFAULT 0
+        $COLLAPSED_HEAD_ID INTEGER DEFAULT 0,
+        $TOPIC_ID INTEGER DEFAULT NULL REFERENCES ${TopicTable.TABLE_NAME} (${TopicTable.ID}) ON DELETE SET NULL
       )
     """
 
@@ -360,7 +367,9 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
       "CREATE INDEX IF NOT EXISTS message_expire_started_index ON $TABLE_NAME ($EXPIRE_STARTED) WHERE $EXPIRE_STARTED > 0",
       "CREATE INDEX IF NOT EXISTS message_view_once_index ON $TABLE_NAME ($VIEW_ONCE) WHERE $VIEW_ONCE > 0",
       "CREATE INDEX IF NOT EXISTS $INDEX_RATE_LIMITED ON $TABLE_NAME ($ID) WHERE ($TYPE & ${MessageTypes.MESSAGE_RATE_LIMITED_BIT}) != 0",
-      "CREATE INDEX IF NOT EXISTS $INDEX_SCHEDULED_NON_STORY ON $TABLE_NAME ($SCHEDULED_DATE) WHERE $STORY_TYPE = 0 AND $PARENT_STORY_ID <= 0 AND $SCHEDULED_DATE != -1"
+      "CREATE INDEX IF NOT EXISTS $INDEX_SCHEDULED_NON_STORY ON $TABLE_NAME ($SCHEDULED_DATE) WHERE $STORY_TYPE = 0 AND $PARENT_STORY_ID <= 0 AND $SCHEDULED_DATE != -1",
+      "CREATE INDEX IF NOT EXISTS message_topic_id_index ON $TABLE_NAME ($TOPIC_ID)",
+      "CREATE INDEX IF NOT EXISTS message_topic_id_read_index ON $TABLE_NAME ($TOPIC_ID, $READ) WHERE $TOPIC_ID IS NOT NULL"
     )
 
     private val MMS_PROJECTION_BASE = arrayOf(
@@ -1048,6 +1057,236 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
 
     return messageId
   }
+
+  // region Topic threads (see docs/topic-threads-design.md)
+
+  /**
+   * Inserts the local "topic started / renamed / deleted" notice message.
+   * This is both the inline chat notice (rendered from [kind]) and -- per
+   * docs/topic-threads-design.md §6.1 -- the anchor message a future
+   * wire-protocol phase will have every in-topic message quote back to.
+   *
+   * Phase 1: always attributed to self, since only local topic actions
+   * exist yet (no wire protocol/sync). [previousName] is required for
+   * [TopicUpdate.Kind.RENAMED] and ignored otherwise.
+   */
+  fun insertTopicUpdateMessage(threadId: Long, topic: TopicRecord, kind: TopicUpdate.Kind, previousName: String? = null, timestamp: Long = System.currentTimeMillis()): MessageId {
+    val toRecipientId = threads.getRecipientIdForThreadId(threadId) ?: error("No recipient for thread $threadId")
+    val self = Recipient.self()
+
+    val body = when (kind) {
+      TopicUpdate.Kind.STARTED -> context.getString(R.string.TopicThread__started_notice, self.getDisplayName(context), topic.name)
+      TopicUpdate.Kind.RENAMED -> context.getString(R.string.TopicThread__renamed_notice, previousName.orEmpty(), topic.name)
+      TopicUpdate.Kind.DELETED -> context.getString(R.string.TopicThread__deleted_notice, topic.name)
+    }
+
+    val messageExtras = MessageExtras(
+      topicUpdate = TopicUpdate(
+        kind = kind,
+        topicUuid = topic.topicUuid,
+        name = topic.name,
+        previousName = previousName.orEmpty()
+      )
+    )
+
+    val values = contentValuesOf(
+      FROM_RECIPIENT_ID to self.id.serialize(),
+      FROM_DEVICE_ID to 1,
+      TO_RECIPIENT_ID to toRecipientId.serialize(),
+      DATE_RECEIVED to timestamp,
+      DATE_SENT to timestamp,
+      READ to 1,
+      NOTIFIED to 1,
+      BODY to body,
+      // Deliberately NOT MessageTypes.TOPIC_UPDATE_TYPE here: that base type isn't recognized by
+      // MessageRecord.isUpdate()/ConversationUpdateItem yet, and inserting an unrecognized special
+      // type risks an "unsupported message" fallback we can't verify without a compile+run cycle.
+      // For now this renders as a normal sent text bubble (its BODY is genuinely readable); teaching
+      // the update-item renderer to render TopicUpdate as a proper system line is a follow-up.
+      // MESSAGE_EXTRAS.topicUpdate is still attached below so that follow-up has the data it needs.
+      TYPE to (MessageTypes.BASE_SENT_TYPE or MessageTypes.SECURE_MESSAGE_BIT or MessageTypes.PUSH_MESSAGE_BIT),
+      THREAD_ID to threadId,
+      MESSAGE_EXTRAS to messageExtras.encode()
+    )
+
+    val messageId = writableDatabase.withinTransaction { db ->
+      MessageId(db.insert(TABLE_NAME, null, values))
+    }
+
+    threads.update(threadId, true)
+    notifyConversationListeners(threadId)
+
+    return messageId
+  }
+
+  /**
+   * Copies [sourceMessageId] into [topicId] as a new, independent message row
+   * -- see docs/topic-threads-design.md §4.2/§7 for why this is a genuine
+   * copy rather than just tagging the original: the original stays
+   * untouched (still a normal message) in the parent timeline.
+   *
+   * Every column is cloned via the same "temp table" technique
+   * [org.thoughtcrime.securesms.database.AttachmentTable.duplicateAttachmentsForMessage]
+   * already uses for message-edit revisions, so this stays correct as the
+   * `message` schema evolves elsewhere rather than needing a hand-maintained
+   * column list. Attachments are duplicated with that same primitive.
+   *
+   * Deliberately NOT copied: reactions (a reaction is a live interaction
+   * with a specific rendered message instance, not content) and mentions'
+   * MentionTable rows (mentions still render correctly from the body/
+   * bodyRanges that are copied -- MentionTable is a secondary search/
+   * notification index that would need its own copy pass; left as a known
+   * gap for a follow-up rather than expanded scope here).
+   */
+  fun copyMessageIntoTopic(threadId: Long, topicId: Long, sourceMessageId: Long): MessageId {
+    val newMessageId = writableDatabase.withinTransaction { db ->
+      db.execSQL("CREATE TEMPORARY TABLE tmp_topic_copy AS SELECT * FROM $TABLE_NAME WHERE $ID = ?", SqlUtil.buildArgs(sourceMessageId))
+      db.execSQL(
+        """
+        UPDATE tmp_topic_copy SET
+          $ID = NULL, $TOPIC_ID = ?, $THREAD_ID = ?,
+          $LATEST_REVISION_ID = NULL, $ORIGINAL_MESSAGE_ID = NULL, $REVISION_NUMBER = 0,
+          $COLLAPSED_STATE = ${CollapsedState.NONE.id}, $COLLAPSED_HEAD_ID = 0
+        """,
+        SqlUtil.buildArgs(topicId, threadId)
+      )
+      db.execSQL("INSERT INTO $TABLE_NAME SELECT * FROM tmp_topic_copy")
+      val newId = db.query("SELECT MAX($ID) FROM $TABLE_NAME").readToSingleLong()
+      db.execSQL("DROP TABLE tmp_topic_copy")
+      newId
+    }
+
+    attachments.duplicateAttachmentsForMessage(newMessageId, sourceMessageId, excludedIds = emptyList())
+
+    return MessageId(newMessageId)
+  }
+
+  /**
+   * Starts a topic from a selection of existing messages: creates the topic,
+   * inserts its "started" notice, copies each of [sourceMessageIds] into it,
+   * and records them as the topic's source messages for label rendering
+   * (see [TopicTable.recordSourceMessages]). [sourceMessageIds] may be empty
+   * for a topic started from scratch (via the header icon rather than a
+   * message selection).
+   *
+   * Throws [TopicTable.TooManyTopicsException] if the chat is already at
+   * [TopicTable.MAX_ACTIVE_TOPICS_PER_THREAD].
+   */
+  fun startTopic(threadId: Long, name: String, sourceMessageIds: Collection<Long> = emptyList()): TopicRecord {
+    var topic = topics.createTopic(threadId, name)
+
+    val anchorMessageId = insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.STARTED)
+    topics.setAnchorMessage(topic.id, anchorMessageId.id)
+    topic = topic.copy(anchorMessageId = anchorMessageId.id)
+
+    for (sourceMessageId in sourceMessageIds) {
+      copyMessageIntoTopic(threadId, topic.id, sourceMessageId)
+    }
+    topics.recordSourceMessages(topic.id, sourceMessageIds)
+
+    return topic
+  }
+
+  /**
+   * Renames an active topic and inserts the "renamed" notice. No-ops (returns
+   * false) if the topic doesn't exist or is already deleted.
+   */
+  fun renameTopic(threadId: Long, topicId: Long, newName: String): Boolean {
+    val topic = topics.getTopic(topicId) ?: return false
+    if (topic.isDeleted || topic.name == newName) return false
+
+    val renamed = topics.renameTopic(topicId, newName)
+    if (!renamed) return false
+
+    insertTopicUpdateMessage(threadId, topic.copy(name = newName), TopicUpdate.Kind.RENAMED, previousName = topic.name)
+    return true
+  }
+
+  /**
+   * Ends a topic: inserts the "deleted" notice in the parent timeline and
+   * tombstones the topic (see [TopicTable.deleteTopic] for why that's a
+   * tombstone, not a row delete). Per docs/topic-threads-design.md §7, the
+   * topic's message copies are left in place on disk (their FK just goes
+   * dangling-safe via ON DELETE SET NULL if the topic row itself is ever hard
+   * deleted) -- they simply stop being reachable through any active-topics
+   * query once the topic is tombstoned.
+   *
+   * Phase 1 note: the design doc's "Delete for me" vs "Delete for everyone"
+   * distinction is a wire-protocol/sync concern (§6.3/§7) that doesn't exist
+   * yet -- both currently perform this same local-only operation. The caller
+   * (the topic thread screen) still presents both options so the UI/UX is in
+   * place ahead of that phase landing.
+   */
+  fun endTopic(threadId: Long, topicId: Long): Boolean {
+    val topic = topics.getTopic(topicId) ?: return false
+    if (topic.isDeleted) return false
+
+    insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.DELETED)
+    return topics.deleteTopic(topicId)
+  }
+
+  /**
+   * Inserts a new message composed while inside a topic thread. Phase 1 note:
+   * this is a local-only insert (self as sender, immediately in the "sent"
+   * state) rather than a real network send -- there is no wire protocol yet
+   * for topic messages to reach other participants/devices (see
+   * docs/topic-threads-design.md §6, a later phase). It exists so the topic
+   * thread screen has something real to show while that phase is pending.
+   */
+  fun insertTopicTextMessage(threadId: Long, topicId: Long, body: String, timestamp: Long = System.currentTimeMillis()): MessageId {
+    val toRecipientId = threads.getRecipientIdForThreadId(threadId) ?: error("No recipient for thread $threadId")
+    val self = Recipient.self()
+
+    val values = contentValuesOf(
+      FROM_RECIPIENT_ID to self.id.serialize(),
+      FROM_DEVICE_ID to 1,
+      TO_RECIPIENT_ID to toRecipientId.serialize(),
+      DATE_RECEIVED to timestamp,
+      DATE_SENT to timestamp,
+      READ to 1,
+      NOTIFIED to 1,
+      BODY to body,
+      TYPE to (MessageTypes.BASE_SENT_TYPE or MessageTypes.SECURE_MESSAGE_BIT or MessageTypes.PUSH_MESSAGE_BIT),
+      THREAD_ID to threadId,
+      TOPIC_ID to topicId
+    )
+
+    val messageId = writableDatabase.withinTransaction { db ->
+      MessageId(db.insert(TABLE_NAME, null, values))
+    }
+
+    // Deliberately no threads.update() here -- topic-owned messages don't drive the parent
+    // chat's snippet/unread badge, per docs/topic-threads-design.md §4.3/§9.
+    notifyConversationListeners(threadId)
+
+    return messageId
+  }
+
+  /**
+   * All messages owned by a topic (see [TOPIC_ID]), oldest first. A minimal,
+   * self-contained query rather than routing through the general-purpose
+   * [MmsReader]/[MessageRecord] deserialization pipeline -- see
+   * docs/topic-threads-design.md and the Phase 1 PR notes for why that
+   * pipeline is deliberately left untouched for now.
+   */
+  fun getTopicMessages(topicId: Long): List<TopicMessage> {
+    return readableDatabase
+      .select(ID, FROM_RECIPIENT_ID, BODY, DATE_SENT)
+      .from(TABLE_NAME)
+      .where("$TOPIC_ID = ?", topicId)
+      .orderBy("$DATE_SENT ASC")
+      .run()
+      .readToList { cursor ->
+        TopicMessage(
+          id = cursor.requireLong(ID),
+          fromRecipientId = RecipientId.from(cursor.requireLong(FROM_RECIPIENT_ID)),
+          body = cursor.requireString(BODY) ?: "",
+          dateSent = cursor.requireLong(DATE_SENT)
+        )
+      }
+  }
+
+  // endregion Topic threads
 
   /**
    * Updates the timestamps associated with the given message id to the given ts
@@ -5730,7 +5969,8 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
   fun getConversation(threadId: Long, offset: Long = 0, limit: Long = 0, dateReceiveOrderBy: String = "DESC", filterCollapsed: Boolean = false): Cursor {
     val limitStr: String = if (limit > 0 || offset > 0) "$offset, $limit" else ""
 
-    var query = "$THREAD_ID = ? AND $STORY_TYPE = ? AND $PARENT_STORY_ID <= ? AND $SCHEDULED_DATE = ? AND $LATEST_REVISION_ID IS NULL"
+    // $TOPIC_ID IS NULL: exclude topic-owned message copies from the parent timeline -- see docs/topic-threads-design.md §4.2/§4.3.
+    var query = "$THREAD_ID = ? AND $STORY_TYPE = ? AND $PARENT_STORY_ID <= ? AND $SCHEDULED_DATE = ? AND $LATEST_REVISION_ID IS NULL AND $TOPIC_ID IS NULL"
     val args = mutableListOf(threadId.toString(), 0.toString(), 0.toString(), (-1).toString())
 
     if (filterCollapsed) {
