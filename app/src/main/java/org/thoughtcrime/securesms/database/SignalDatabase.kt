@@ -72,6 +72,7 @@ open class SignalDatabase(private val context: Application, databaseSecret: Data
   val pollTable: PollTables = PollTables(context, this)
   val lastResortKeyTuples: LastResortKeyTupleTable = LastResortKeyTupleTable(context, this)
   val attachmentMetadataTable: AttachmentMetadataTable = AttachmentMetadataTable(context, this)
+  val topicTable: TopicTable = TopicTable(context, this)
 
   override fun onOpen(db: net.zetetic.database.sqlcipher.SQLiteDatabase) {
     db.setForeignKeyConstraintsEnabled(true)
@@ -130,6 +131,8 @@ open class SignalDatabase(private val context: Application, databaseSecret: Data
     db.execSQL(BackupMediaSnapshotTable.CREATE_TABLE)
     db.execSQL(LastResortKeyTupleTable.CREATE_TABLE)
     db.execSQL(AttachmentMetadataTable.CREATE_TABLE)
+    db.execSQL(TopicTable.CREATE_TABLE)
+    db.execSQL(TopicTable.TopicSourceMessageTable.CREATE_TABLE)
 
     executeStatements(db, RecipientTable.CREATE_INDEXS)
     executeStatements(db, MessageTable.CREATE_INDEXS)
@@ -155,6 +158,8 @@ open class SignalDatabase(private val context: Application, databaseSecret: Data
     executeStatements(db, NameCollisionTables.CREATE_INDEXES)
     executeStatements(db, BackupMediaSnapshotTable.CREATE_INDEXES)
     executeStatements(db, PollTables.CREATE_INDEXES)
+    executeStatements(db, TopicTable.CREATE_INDEXES)
+    executeStatements(db, TopicTable.TopicSourceMessageTable.CREATE_INDEXES)
 
     executeStatements(db, MessageSendLogTables.CREATE_TRIGGERS)
 
@@ -551,6 +556,11 @@ open class SignalDatabase(private val context: Application, databaseSecret: Data
     @get:JvmName("polls")
     val polls: PollTables
       get() = instance!!.pollTable
+
+    @get:JvmStatic
+    @get:JvmName("topics")
+    val topics: TopicTable
+      get() = instance!!.topicTable
 
     @get:JvmStatic
     @get:JvmName("lastResortKeyTuples")

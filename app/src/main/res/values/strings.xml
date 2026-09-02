@@ -9973,5 +9973,12 @@
     <!-- Button declining to paste the recovery key -->
     <string name="RecoveryKeyWarningDialog__dont_share">Don\'t share</string>
 
+    <!-- Inline chat notice shown when a topic thread is started. %1$s is the name of the person who started it, %2$s is the topic name. -->
+    <string name="TopicThread__started_notice">📌 %1$s started a topic: %2$s</string>
+    <!-- Inline chat notice shown when a topic thread is renamed. %1$s is the old name, %2$s is the new name. -->
+    <string name="TopicThread__renamed_notice">📌 Topic renamed: %1$s → %2$s</string>
+    <!-- Inline chat notice shown when a topic thread is deleted. %1$s is the topic name. -->
+    <string name="TopicThread__deleted_notice">📌 Topic deleted: %1$s</string>
+
     <!-- EOF -->
 </resources>
