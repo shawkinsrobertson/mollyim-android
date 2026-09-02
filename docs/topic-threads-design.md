@@ -50,6 +50,15 @@ stock-Signal-recipient case from the proto's own compatibility guarantees.
 - **Switching topics:** the header icon's dropdown lets the user jump directly between the parent chat and any of its topics, and create a new one (up to the 6 cap, at which point "New topic" is disabled/hidden).
 - **Topic thread screen:** tapping a topic (via label, notice, or dropdown) pushes a new full-screen conversation view — its own header (topic name + back arrow to the parent), reusing the existing conversation UI/adapter filtered to that topic.
 - **Renaming / deleting:** available from inside the topic thread itself (e.g. via its header's overflow menu). Deleting prompts with the same **Delete for me / Delete for everyone** two-button flow already used for individual messages (§7 covers exactly what each option does).
+- **Topic thread kebab menu:** carries over the parent chat's overflow menu (`res/menu/conversation.xml` + the mute/unmute variants), specifically: `menu_view_media` (all media), `menu_search`, `menu_add_shortcut` (add to home screen), and `menu_mute_notifications`/`menu_unmute_notifications`. **`menu_conversation_settings` is dropped** — a topic isn't a `Recipient`, so "chat settings" (which configures things like the wallpaper/theme that topics already inherit from the parent, per §3's "feature parity" bullet) doesn't apply to it. `menu_create_bubble`, `menu_export`, and the text-formatting submenu aren't explicitly called out yet — default assumption is formatting stays (it's a compose-box feature, not conversation-scoped) and bubble/export need a decision (does "export chat" from inside a topic export just the topic, or the whole parent conversation?) — flagged in §9.
+
+### 3.1 Unread & notification surfacing
+
+- **Bottom nav "Topics" tab.** A fourth entry alongside the existing Chats/Calls/Stories tabs (`MainNavigationListLocation` in `main/MainNavigation.kt`), with a `topicsCount: Int` added to `MainNavigationState` following the exact same pattern `chatsCount`/`callsCount`/`storiesCount` already use — including the existing red numbered badge (`drawNavigationBarBadge`, color `R.color.ConversationListTabs__unread`). `topicsCount` is the total number of topics (across all chats) with at least one unread message.
+- **Topic list overlay.** Selecting the Topics tab overlays a list of topics with unread activity on top of the main chat screen (list of topic name + parent chat + unread count), letting the user jump straight into any of them. This is a new screen, not a repurposing of the conversation list — needs its own view model/query (unread topic-owned messages grouped by `topic_id`, joined to `topic.name` and the parent `thread`'s recipient for display).
+- **Header topic icon (inside a conversation):** shows a small blue unread dot (no number) when the parent chat has any topic with unread messages — distinct from the tab's red numbered badge, which is global; this one is scoped to the open conversation.
+- **Topic dropdown:** each topic listed gets its own blue unread dot when it individually has unread messages, so the user can tell which of up to 6 topics need attention without opening each one.
+- **Read-state plumbing:** all three of the above need per-topic unread counts, which resolves open question #3 below — topic-owned messages **do** need first-class read/unread tracking (not just "invisible to `ThreadTable`" as originally drafted). See the updated §9 note.
 - **Feature parity:** all standard messaging capabilities (attachments, reactions, replies, edits, polls, etc.) work inside a topic thread exactly as in a normal chat. Chat theme/wallpaper/color follow the parent chat automatically since a topic is not a separate `Recipient` (see §4.1) — no extra plumbing needed there.
 - **Per-message deletion:** individual messages inside a topic support the existing **Delete for me / Delete for everyone**, unchanged.
 
@@ -115,11 +124,20 @@ Per the "duplicate rows" decision:
   with `topic_id` set from the start — there is no "original" row in the
   parent timeline for these; the parent timeline only ever shows the
   anchor's inline notice.
-- The parent chat's `ThreadTable` snippet/unread-count logic is **not**
-  changed by topic-owned messages with no parent-timeline row — a topic is
-  additive read/unread state layered on the same underlying thread (see
-  §9 for the still-open question of whether topic activity should bump the
-  parent chat's unread badge).
+- **Unread tracking is per-topic, not just per-thread.** Per §3.1, the
+  bottom-nav Topics tab, the header icon's blue dot, and the per-topic dots
+  in the dropdown all need to know "does this topic have unread messages,"
+  independent of the parent chat's own `ThreadTable.UNREAD_COUNT`. Rather
+  than duplicate `message.read` bookkeeping, this is a derived count —
+  `SELECT topic_id, COUNT(*) FROM message WHERE topic_id IS NOT NULL AND
+  read = 0 GROUP BY topic_id` — so a topic-owned message's `read` flag is
+  the single source of truth and already gets set through the normal
+  mark-read pipeline when the user views the topic thread; no new column
+  needed on `message`, just new queries and a `topic.last_unread_check`-style
+  cache if the aggregate query proves too hot on the main thread list. The
+  parent chat's own `ThreadTable` unread count/snippet is **still** left
+  unaffected by topic-owned messages (they don't have a parent-timeline
+  row to summarize) — the Topics tab is the surfacing mechanism instead.
 
 ## 5. Local system notices — `MessageExtras`
 
@@ -376,30 +394,59 @@ gap rather than an oversight.
    upstream (confirmed: `PinMessage`/`UnpinMessage`/`AdminDelete` at fields
    27–29 already exist in both repos identically). Any new field numbers
    claimed here (`DataMessage` 30/31, `SyncMessage.content` 27,
-   `ChatItem.item` 23) are a race against whatever upstream claims next —
-   this needs to be re-verified against upstream's current numbering
-   immediately before implementation, not just at design time.
+   `ChatItem.item` 23) are a race against whatever upstream claims next for
+   an unrelated feature. Molly doesn't own this proto — a collision found
+   *before* we ship is a harmless git conflict to renumber around; a
+   collision found *after* we ship is permanent (old clients have already
+   persisted/sent the field under our meaning) and needs a real migration
+   to untangle. Two mitigations to decide on before implementation, not
+   just "re-verify the number right before shipping" (still necessary,
+   but not sufficient on its own):
+   - Re-verify next-free numbers immediately before each implementation PR.
+   - **Consider claiming a deliberately high, out-of-the-way field-number
+     band (e.g. 9000+) for all Molly-only extensions**, instead of
+     competing for the next sequential slot Signal's own devs are actively
+     filling in. Costs a couple extra wire-format bytes per message;
+     structurally avoids the race instead of just re-checking for it.
 2. **`BASE_TYPE_MASK` headroom.** Only 4 values remain free (19, 29, 30, 31)
-   in the 5-bit base-type space system-wide, not just for this feature. This
-   design deliberately spends only **one** of them (§5) and pushes
-   everything else through `MessageExtras`, but that's a shared, scarce
-   resource worth flagging to whoever owns that part of the schema.
-3. **Does topic activity affect the parent chat's unread badge / snippet /
-   notifications?** Not decided yet — §4.3 currently treats topic-owned
-   messages as invisible to `ThreadTable`'s existing unread/snippet logic,
-   which means a topic could accumulate unread messages with zero visible
-   signal on the conversation list. Needs a decision: likely "yes, still
-   contributes to the parent chat's unread count and triggers notifications
-   normally, just doesn't render inline," but should be confirmed.
+   in the 5-bit base-type space system-wide, not just for this feature —
+   and unlike the wire-protocol numbers above, there's no "pick a high
+   band instead" escape hatch here, since `BASE_TYPE_MASK` is fixed at 5
+   bits for the whole app's local schema. This design deliberately spends
+   only **one** of the 4 remaining values (§5) and pushes everything else
+   through `MessageExtras` (which has no such ceiling — it's a protobuf
+   `oneof` that can grow indefinitely), but the base-type slot we do spend
+   is still racing the same upstream-merge risk as #1, just at the local
+   DB layer instead of the wire layer — worth the same "re-verify
+   immediately before implementation" treatment.
+3. **Resolved — topic unread surfacing.** Decided: a dedicated bottom-nav
+   "Topics" tab (red numbered badge, same mechanism as Chats/Calls/Stories)
+   plus a blue (unnumbered) unread dot on the conversation header's topic
+   icon and on each topic in its dropdown. Selecting the tab overlays a
+   list of topics with unread activity for quick navigation. Full spec in
+   §3.1/§4.3. Still open beneath this: whether topic activity should also
+   trigger a normal Android push notification the way parent-chat messages
+   do (leaning yes, for consistency, but not yet confirmed) and whether the
+   Topics-tab overlay needs its own "mark all read" affordance.
 4. **Does global message search include topic-owned messages?** Leaning
    yes (they're still real rows in the same database), but not yet decided.
-5. **6-topic cap is unenforceable against a modified peer.** A client that
+5. **Kebab menu scope for `menu_create_bubble`/`menu_export`.** §3 carries
+   over all-media/search/add-to-home-screen/mute and explicitly drops chat
+   settings, per direct instruction. Bubble and chat-export weren't called
+   out either way — open question: does "export" from inside a topic export
+   just that topic's messages, or the whole parent conversation? Does
+   "create bubble" make sense at all for a topic (a bubble is an Android
+   conversation-shortcut concept tied to the parent `Recipient`, which a
+   topic doesn't have)? Leaning toward dropping both from the topic kebab
+   for the same reason chat settings was dropped, but flagging rather than
+   assuming.
+6. **6-topic cap is unenforceable against a modified peer.** A client that
    doesn't respect the cap (or a future Molly bug) could create a 7th topic
    and sync it in; this design treats that as "display the first 6,
    degrade gracefully" rather than trying to enforce a hard protocol-level
    limit, since there's no server-side authority for chat-scoped metadata
    like this (unlike, say, group membership).
-6. **New-linked-device backfill.** A device linked *after* topics already
+7. **New-linked-device backfill.** A device linked *after* topics already
    exist needs the existing multi-device history-sync mechanism to carry
    topic state over — not yet mapped to a specific existing sync flow;
    needs investigation into how the current initial-sync/backfill path
