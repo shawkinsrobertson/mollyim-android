@@ -14,22 +14,29 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.thoughtcrime.securesms.conversation.ConversationMessage
 import org.thoughtcrime.securesms.database.SignalDatabase
 import org.thoughtcrime.securesms.dependencies.AppDependencies
 import org.thoughtcrime.securesms.recipients.Recipient
 
 /**
- * Backs [TopicThreadActivity]/[TopicThreadScreen]. See docs/topic-threads-design.md.
+ * Backs [TopicThreadActivity]. See docs/topic-threads-design.md.
  *
- * Phase 1 note: sending a message here is a local-only insert
- * (MessageTable.insertTopicTextMessage), not a real network send -- there is
- * no wire protocol yet for topic messages to reach other participants (a
- * later phase). This screen exists to make the local data model testable.
+ * Phase note: [sendMessage] is still a local-only insert
+ * (MessageTable.insertTopicTextMessage), not a real network send -- that's the next slice
+ * (reusing OutgoingMessage/MessageSender the same way the main conversation screen does; see the
+ * "full parity" design discussion). Rendering, however, now goes through the same
+ * MessageRecord -> ConversationMessage pipeline the main conversation screen uses (see
+ * [TopicConversationRepository]), so bubbles/reactions/quotes/theming already match.
  */
 class TopicThreadViewModel(private val threadId: Long, private val topicId: Long) : ViewModel() {
 
+  private val repository = TopicConversationRepository(AppDependencies.application)
+
   private val internalUiState = MutableStateFlow(TopicThreadUiState())
   val uiState: StateFlow<TopicThreadUiState> = internalUiState.asStateFlow()
+
+  val threadRecipient: Recipient by lazy { SignalDatabase.threads.getRecipientForThreadId(threadId)!! }
 
   init {
     refresh()
@@ -39,15 +46,7 @@ class TopicThreadViewModel(private val threadId: Long, private val topicId: Long
     viewModelScope.launch {
       val (topicName, messages) = withContext(Dispatchers.IO) {
         val topic = SignalDatabase.topics.getTopic(topicId)
-        val messages = SignalDatabase.messages.getTopicMessages(topicId).map { message ->
-          val sender = Recipient.resolved(message.fromRecipientId)
-          TopicMessageUiModel(
-            id = message.id,
-            senderName = if (sender.isSelf) null else sender.getShortDisplayName(AppDependencies.application),
-            body = message.body,
-            isOutgoing = sender.isSelf
-          )
-        }
+        val messages = repository.loadMessages(topicId, threadRecipient)
         (topic?.name ?: "") to messages
       }
 
@@ -93,14 +92,7 @@ class TopicThreadViewModel(private val threadId: Long, private val topicId: Long
 
 data class TopicThreadUiState(
   val topicName: String = "",
-  val messages: List<TopicMessageUiModel> = emptyList(),
+  val messages: List<ConversationMessage> = emptyList(),
   val isLoading: Boolean = true,
   val isFinished: Boolean = false
-)
-
-data class TopicMessageUiModel(
-  val id: Long,
-  val senderName: String?,
-  val body: String,
-  val isOutgoing: Boolean
 )

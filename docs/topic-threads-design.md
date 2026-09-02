@@ -486,3 +486,56 @@ Given the scope, this is not a single PR:
 3. **Phase 3 — backup v2 integration.** §8.
 4. **Phase 4 — polish & the open questions in §9**, plus real Molly↔Molly
    multi-device testing.
+
+## 11. Topic thread screen rendering — reuse, not a bespoke UI
+
+The first Phase 1 UI pass (see PR history) built the topic thread screen as
+a standalone, hand-rolled Compose list — deliberately, to keep that first
+slice small and reviewable, but at the cost of no bubbles, no theming, no
+reactions/replies/attachments/voice notes. That was always meant to be
+temporary; this section documents the real approach once "full parity" was
+worked out with the user.
+
+**The mechanism: reuse `ConversationAdapter` (V1), not `ConversationAdapterV2`.**
+This app has *two* message-list adapters. `ConversationAdapterV2` is what
+the main `ConversationFragment` uses, and it's tightly bound to that
+fragment's paging/viewmodel machinery. `ConversationAdapter` (the older,
+still-actively-used V1) is a plain `ListAdapter<ConversationMessage, ...>` —
+no paging controller, just `submitList()` — and this app already uses it
+for exactly this situation: rendering a *filtered* view of a thread's
+messages in a secondary screen, with full bubble/theming/reaction fidelity.
+`ScheduledMessagesBottomSheet`, `PinnedMessagesBottomSheet`, and
+`MessageQuotesBottomSheet` are the existing precedents this topic thread
+screen now follows.
+
+**Isolation is preserved by composition, not by avoiding shared code.**
+The topic thread screen constructs its own `ConversationAdapter`,
+`ColorizerV1`, and `RecyclerViewColorizer` instances, and calls
+`ChatWallpaper.loadInto(...)` directly for the wallpaper background — all
+real, shared rendering classes, none of them modified. The one interface
+with real breadth (`ConversationAdapter.ItemClickListener`, ~54 methods) is
+handled via Kotlin's `by` delegation to `EmptyConversationAdapterListener`
+(an existing, complete no-op implementation already shipped elsewhere in
+this app for this exact interface), with only the couple of methods the
+topic screen actually needs overridden. No edits to `ConversationFragment`,
+`ConversationViewModel`, `ConversationRepository`, `ConversationAdapterV2`,
+`MessageSender`, or `OutgoingMessage` were needed to get real rendering.
+
+**What this bought:** bubbles, reactions, quotes, and chat theming/wallpaper
+now render identically to the main thread, reading the topic's messages
+through the same `MessageRecord` → `MessageDataFetcher` → `ConversationMessage`
+pipeline the main screen uses (`TopicConversationRepository`).
+
+**What's still not wired (tracked as the next slices, not done here):**
+- Sending is still the Phase 1 local-only insert
+  (`MessageTable.insertTopicTextMessage`) — not yet routed through the real
+  `OutgoingMessage`/`MessageSender.send()` path this doc's earlier
+  discussion confirmed is equally reusable/isolatable.
+- Attachments and voice notes: neither composing (no `InputPanel` yet) nor
+  playback (`onVoiceNotePlay` is currently a no-op via the delegate) is
+  wired. Content that already has attachments (e.g. a message copied into a
+  topic that had one) should still *render* correctly, since rendering
+  doesn't depend on the click listener.
+- Long-press multi-select inside a topic thread (for per-message
+  delete-for-me/delete-for-everyone) is a no-op via the delegate — §7's
+  per-message deletion still only works from the parent timeline for now.
