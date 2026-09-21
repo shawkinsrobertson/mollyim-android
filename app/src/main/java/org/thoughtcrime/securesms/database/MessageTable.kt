@@ -123,6 +123,7 @@ import org.thoughtcrime.securesms.database.model.databaseprotos.PollTerminate
 import org.thoughtcrime.securesms.database.model.databaseprotos.ProfileChangeDetails
 import org.thoughtcrime.securesms.database.model.databaseprotos.SessionSwitchoverEvent
 import org.thoughtcrime.securesms.database.model.databaseprotos.ThreadMergeEvent
+import org.thoughtcrime.securesms.database.model.databaseprotos.TopicSourceMessage
 import org.thoughtcrime.securesms.database.model.databaseprotos.TopicUpdate
 import org.thoughtcrime.securesms.dependencies.AppDependencies
 import org.thoughtcrime.securesms.groups.GroupMigrationMembershipChange
@@ -144,6 +145,7 @@ import org.thoughtcrime.securesms.recipients.Recipient
 import org.thoughtcrime.securesms.recipients.RecipientId
 import org.thoughtcrime.securesms.revealable.ViewOnceExpirationInfo
 import org.thoughtcrime.securesms.sms.GroupV2UpdateMessageUtil
+import org.thoughtcrime.securesms.sms.MessageSender
 import org.thoughtcrime.securesms.stories.Stories.isFeatureEnabled
 import org.thoughtcrime.securesms.util.DateUtils
 import org.thoughtcrime.securesms.util.MediaUtil
@@ -444,13 +446,14 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
           $DATE_RECEIVED
         FROM 
           $TABLE_NAME INDEXED BY $INDEX_THREAD_STORY_SCHEDULED_DATE_LATEST_REVISION_ID
-        WHERE 
-          $THREAD_ID = ? AND 
-          $TYPE & ${MessageTypes.GROUP_V2_LEAVE_BITS} != ${MessageTypes.GROUP_V2_LEAVE_BITS} AND 
-          $STORY_TYPE = 0 AND 
+        WHERE
+          $THREAD_ID = ? AND
+          $TYPE & ${MessageTypes.GROUP_V2_LEAVE_BITS} != ${MessageTypes.GROUP_V2_LEAVE_BITS} AND
+          $STORY_TYPE = 0 AND
           $PARENT_STORY_ID <= 0 AND
           $SCHEDULED_DATE = -1 AND
           $LATEST_REVISION_ID IS NULL AND
+          $TOPIC_ID IS NULL AND
           $TYPE & ${MessageTypes.KEY_EXCHANGE_IDENTITY_DEFAULT_BIT} = 0 AND
           $TYPE & ${MessageTypes.KEY_EXCHANGE_IDENTITY_VERIFIED_BIT} = 0 AND
           $TYPE & ${MessageTypes.SPECIAL_TYPES_MASK} != ${MessageTypes.SPECIAL_TYPE_REPORTED_SPAM} AND
@@ -1060,16 +1063,27 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
   // region Topic threads (see docs/topic-threads-design.md)
 
   /**
-   * Inserts the local "topic started / renamed / deleted" notice message.
-   * This is both the inline chat notice (rendered from [kind]) and -- per
-   * docs/topic-threads-design.md §6.1 -- the anchor message a future
-   * wire-protocol phase will have every in-topic message quote back to.
+   * Inserts and *really sends* the "topic started / renamed / deleted" notice
+   * message -- this is both the inline chat notice (rendered from [kind]) and,
+   * per docs/topic-threads-design.md §6.1, the anchor message every in-topic
+   * message quotes back to.
    *
-   * Phase 1: always attributed to self, since only local topic actions
-   * exist yet (no wire protocol/sync). [previousName] is required for
-   * [TopicUpdate.Kind.RENAMED] and ignored otherwise.
+   * Routed through the same [MessageSender.send]/[OutgoingMessage] pipeline
+   * as any other real message (see §12/"full parity" PR notes and the
+   * wire-send PR): [MessageSender.send] itself calls [insertMessageOutbox],
+   * so the local notice row is still created here, just via the real outbox
+   * path instead of a bespoke `db.insert()` -- and it's now actually
+   * delivered, carrying [MessageExtras.topicUpdate] which [PushSendJob]
+   * reads to populate the wire `DataMessage.TopicContext`.
+   *
+   * [previousName] is required for [TopicUpdate.Kind.RENAMED] and ignored
+   * otherwise. [sourceMessageIds] is only meaningful for
+   * [TopicUpdate.Kind.STARTED] (messages selected when the topic was
+   * created) and is resolved to (author, sentTimestamp) pairs -- the same
+   * addressing precedent [PinnedMessage]/[AdminDeleteStatus] already use --
+   * so a peer can copy the same source messages into their own local topic.
    */
-  fun insertTopicUpdateMessage(threadId: Long, topic: TopicRecord, kind: TopicUpdate.Kind, previousName: String? = null, timestamp: Long = System.currentTimeMillis()): MessageId {
+  fun insertTopicUpdateMessage(threadId: Long, topic: TopicRecord, kind: TopicUpdate.Kind, previousName: String? = null, sourceMessageIds: Collection<Long> = emptyList(), timestamp: Long = System.currentTimeMillis()): MessageId {
     val toRecipientId = threads.getRecipientIdForThreadId(threadId) ?: error("No recipient for thread $threadId")
     val self = Recipient.self()
 
@@ -1079,43 +1093,30 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
       TopicUpdate.Kind.DELETED -> context.getString(R.string.TopicThread__deleted_notice, topic.name)
     }
 
+    val sourceMessages = sourceMessageIds.map { sourceMessageId ->
+      val record = getMessageRecord(sourceMessageId)
+      TopicSourceMessage(authorAci = record.fromRecipient.requireAci().toByteString(), sentTimestamp = record.dateSent)
+    }
+
     val messageExtras = MessageExtras(
       topicUpdate = TopicUpdate(
         kind = kind,
         topicUuid = topic.topicUuid,
         name = topic.name,
-        previousName = previousName.orEmpty()
+        previousName = previousName.orEmpty(),
+        sourceMessages = sourceMessages
       )
     )
 
-    val values = contentValuesOf(
-      FROM_RECIPIENT_ID to self.id.serialize(),
-      FROM_DEVICE_ID to 1,
-      TO_RECIPIENT_ID to toRecipientId.serialize(),
-      DATE_RECEIVED to timestamp,
-      DATE_SENT to timestamp,
-      READ to 1,
-      NOTIFIED to 1,
-      BODY to body,
-      // Deliberately NOT MessageTypes.TOPIC_UPDATE_TYPE here: that base type isn't recognized by
-      // MessageRecord.isUpdate()/ConversationUpdateItem yet, and inserting an unrecognized special
-      // type risks an "unsupported message" fallback we can't verify without a compile+run cycle.
-      // For now this renders as a normal sent text bubble (its BODY is genuinely readable); teaching
-      // the update-item renderer to render TopicUpdate as a proper system line is a follow-up.
-      // MESSAGE_EXTRAS.topicUpdate is still attached below so that follow-up has the data it needs.
-      TYPE to (MessageTypes.BASE_SENT_TYPE or MessageTypes.SECURE_MESSAGE_BIT or MessageTypes.PUSH_MESSAGE_BIT),
-      THREAD_ID to threadId,
-      MESSAGE_EXTRAS to messageExtras.encode()
+    val outgoing = OutgoingMessage(
+      threadRecipient = Recipient.resolved(toRecipientId),
+      sentTimeMillis = timestamp,
+      body = body,
+      isSecure = true,
+      messageExtras = messageExtras
     )
 
-    val messageId = writableDatabase.withinTransaction { db ->
-      MessageId(db.insert(TABLE_NAME, null, values))
-    }
-
-    threads.update(threadId, true)
-    notifyConversationListeners(threadId)
-
-    return messageId
+    return MessageId(MessageSender.send(context, outgoing, threadId, MessageSender.SendType.SIGNAL, null, null))
   }
 
   /**
@@ -1174,7 +1175,7 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
   fun startTopic(threadId: Long, name: String, sourceMessageIds: Collection<Long> = emptyList()): TopicRecord {
     var topic = topics.createTopic(threadId, name)
 
-    val anchorMessageId = insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.STARTED)
+    val anchorMessageId = insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.STARTED, sourceMessageIds = sourceMessageIds)
     topics.setAnchorMessage(topic.id, anchorMessageId.id)
     topic = topic.copy(anchorMessageId = anchorMessageId.id)
 
@@ -1222,43 +1223,6 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
 
     insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.DELETED)
     return topics.deleteTopic(topicId)
-  }
-
-  /**
-   * Inserts a new message composed while inside a topic thread. Phase 1 note:
-   * this is a local-only insert (self as sender, immediately in the "sent"
-   * state) rather than a real network send -- there is no wire protocol yet
-   * for topic messages to reach other participants/devices (see
-   * docs/topic-threads-design.md §6, a later phase). It exists so the topic
-   * thread screen has something real to show while that phase is pending.
-   */
-  fun insertTopicTextMessage(threadId: Long, topicId: Long, body: String, timestamp: Long = System.currentTimeMillis()): MessageId {
-    val toRecipientId = threads.getRecipientIdForThreadId(threadId) ?: error("No recipient for thread $threadId")
-    val self = Recipient.self()
-
-    val values = contentValuesOf(
-      FROM_RECIPIENT_ID to self.id.serialize(),
-      FROM_DEVICE_ID to 1,
-      TO_RECIPIENT_ID to toRecipientId.serialize(),
-      DATE_RECEIVED to timestamp,
-      DATE_SENT to timestamp,
-      READ to 1,
-      NOTIFIED to 1,
-      BODY to body,
-      TYPE to (MessageTypes.BASE_SENT_TYPE or MessageTypes.SECURE_MESSAGE_BIT or MessageTypes.PUSH_MESSAGE_BIT),
-      THREAD_ID to threadId,
-      TOPIC_ID to topicId
-    )
-
-    val messageId = writableDatabase.withinTransaction { db ->
-      MessageId(db.insert(TABLE_NAME, null, values))
-    }
-
-    // Deliberately no threads.update() here -- topic-owned messages don't drive the parent
-    // chat's snippet/unread badge, per docs/topic-threads-design.md §4.3/§9.
-    notifyConversationListeners(threadId)
-
-    return messageId
   }
 
   /**
@@ -3738,6 +3702,10 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
     contentValues.putNull(LATEST_REVISION_ID)
     contentValues.put(MESSAGE_EXTRAS, message.messageExtras?.encode())
 
+    if (message.topicId != null) {
+      contentValues.put(TOPIC_ID, topics.getTopicByUuid(message.topicId)?.id)
+    }
+
     if (editedMessage != null) {
       contentValues.put(ORIGINAL_MESSAGE_ID, editedMessage.getOriginalOrOwnMessageId().id)
       contentValues.put(REVISION_NUMBER, editedMessage.revisionNumber + 1)
@@ -5492,7 +5460,7 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
     return readableDatabase
       .select("COUNT(*)")
       .from("$TABLE_NAME INDEXED BY $INDEX_THREAD_UNREAD_COUNT")
-      .where("$THREAD_ID = $threadId AND $STORY_TYPE = 0 AND $PARENT_STORY_ID <= 0 AND $ORIGINAL_MESSAGE_ID IS NULL AND $SCHEDULED_DATE = -1 AND $READ = 0 AND $pinnedMessageClause")
+      .where("$THREAD_ID = $threadId AND $STORY_TYPE = 0 AND $PARENT_STORY_ID <= 0 AND $ORIGINAL_MESSAGE_ID IS NULL AND $SCHEDULED_DATE = -1 AND $READ = 0 AND $TOPIC_ID IS NULL AND $pinnedMessageClause")
       .run()
       .readToSingleInt()
   }

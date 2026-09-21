@@ -17,17 +17,22 @@ import kotlinx.coroutines.withContext
 import org.thoughtcrime.securesms.conversation.ConversationMessage
 import org.thoughtcrime.securesms.database.SignalDatabase
 import org.thoughtcrime.securesms.dependencies.AppDependencies
+import org.thoughtcrime.securesms.mms.OutgoingMessage
+import org.thoughtcrime.securesms.mms.QuoteModel
 import org.thoughtcrime.securesms.recipients.Recipient
+import org.thoughtcrime.securesms.sms.MessageSender
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Backs [TopicThreadActivity]. See docs/topic-threads-design.md.
  *
- * Phase note: [sendMessage] is still a local-only insert
- * (MessageTable.insertTopicTextMessage), not a real network send -- that's the next slice
- * (reusing OutgoingMessage/MessageSender the same way the main conversation screen does; see the
- * "full parity" design discussion). Rendering, however, now goes through the same
- * MessageRecord -> ConversationMessage pipeline the main conversation screen uses (see
- * [TopicConversationRepository]), so bubbles/reactions/quotes/theming already match.
+ * [sendMessage] routes through the real [OutgoingMessage]/[MessageSender.send] pipeline (the
+ * same one the main conversation screen uses), tagging the message with the topic's wire
+ * `topic_uuid` (§6.2) and quoting the topic's anchor message (§6.1's graceful-degradation
+ * mechanism -- a stock-Signal/non-topic-aware recipient still sees a normal reply-quote bubble).
+ * Rendering goes through the same MessageRecord -> ConversationMessage pipeline the main
+ * conversation screen uses (see [TopicConversationRepository]), so bubbles/reactions/quotes/
+ * theming already match.
  */
 class TopicThreadViewModel(private val threadId: Long, private val topicId: Long) : ViewModel() {
 
@@ -62,7 +67,14 @@ class TopicThreadViewModel(private val threadId: Long, private val topicId: Long
 
     viewModelScope.launch {
       withContext(Dispatchers.IO) {
-        SignalDatabase.messages.insertTopicTextMessage(threadId, topicId, trimmed)
+        val topic = SignalDatabase.topics.getTopic(topicId) ?: return@withContext
+        val anchor = topic.anchorMessageId?.let { runCatching { SignalDatabase.messages.getMessageRecord(it) }.getOrNull() }
+        val quote = anchor?.let { QuoteModel(it.dateSent, it.fromRecipient.id, it.body, false, null, null, QuoteModel.Type.NORMAL, it.messageRanges) }
+
+        val outgoing = OutgoingMessage.text(threadRecipient, trimmed, threadRecipient.expiresInSeconds.seconds.inWholeMilliseconds)
+          .copy(topicId = topic.topicUuid, outgoingQuote = quote)
+
+        MessageSender.send(AppDependencies.application, outgoing, threadId, MessageSender.SendType.SIGNAL, null, null)
       }
       refresh()
     }

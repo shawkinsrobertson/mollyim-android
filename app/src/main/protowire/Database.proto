@@ -588,6 +588,16 @@ message TopicUpdate {
     string topicUuid = 2;
     string name = 3;          // new name for STARTED/RENAMED
     string previousName = 4;  // set for RENAMED
+    repeated TopicSourceMessage sourceMessages = 5; // messages copied in at STARTED time
+}
+
+// A message reference by (author, sentTimestamp), the same addressing shape
+// PinnedMessage above already uses -- kept local-only and separate from the
+// wire-protocol DataMessage.TopicContext.sourceMessages, which uses that
+// proto's own AddressableMessage type.
+message TopicSourceMessage {
+    bytes authorAci = 1;
+    uint64 sentTimestamp = 2;
 }
 
 message LocalRegistrationMetadata {

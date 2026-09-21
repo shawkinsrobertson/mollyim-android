@@ -54,7 +54,9 @@ class SignalServiceDataMessage private constructor(
   val pollTerminate: Optional<PollTerminate>,
   val pinnedMessage: Optional<PinnedMessage>,
   val unpinnedMessage: Optional<UnpinnedMessage>,
-  val adminDelete: Optional<AdminDelete>
+  val adminDelete: Optional<AdminDelete>,
+  val topicContext: Optional<TopicContext>,
+  val topicId: Optional<String>
 ) {
   val isActivatePaymentsRequest: Boolean = payment.map { it.isActivationRequest }.orElse(false)
   val isPaymentsActivated: Boolean = payment.map { it.isActivation }.orElse(false)
@@ -77,7 +79,8 @@ class SignalServiceDataMessage private constructor(
       this.pollVote.isPresent ||
       this.pollTerminate.isPresent ||
       this.pinnedMessage.isPresent ||
-      this.unpinnedMessage.isPresent
+      this.unpinnedMessage.isPresent ||
+      this.topicContext.isPresent
 
   val isGroupV2Update: Boolean = groupContext.isPresent && groupContext.get().hasSignedGroupChange() && !hasRenderableContent
   val isEmptyGroupV2Message: Boolean = isGroupV2Message && !isGroupV2Update && !hasRenderableContent
@@ -111,6 +114,8 @@ class SignalServiceDataMessage private constructor(
     private var pinnedMessage: PinnedMessage? = null
     private var unpinnedMessage: UnpinnedMessage? = null
     private var adminDelete: AdminDelete? = null
+    private var topicContext: TopicContext? = null
+    private var topicId: String? = null
 
     fun withTimestamp(timestamp: Long): Builder {
       this.timestamp = timestamp
@@ -258,6 +263,16 @@ class SignalServiceDataMessage private constructor(
       return this
     }
 
+    fun withTopicContext(topicContext: TopicContext?): Builder {
+      this.topicContext = topicContext
+      return this
+    }
+
+    fun withTopicId(topicId: String?): Builder {
+      this.topicId = topicId
+      return this
+    }
+
     fun build(): SignalServiceDataMessage {
       if (timestamp == 0L) {
         timestamp = System.currentTimeMillis()
@@ -291,7 +306,9 @@ class SignalServiceDataMessage private constructor(
         pollTerminate = pollTerminate.asOptional(),
         pinnedMessage = pinnedMessage.asOptional(),
         unpinnedMessage = unpinnedMessage.asOptional(),
-        adminDelete = adminDelete.asOptional()
+        adminDelete = adminDelete.asOptional(),
+        topicContext = topicContext.asOptional(),
+        topicId = topicId.asOptional()
       )
     }
   }
@@ -341,6 +358,10 @@ class SignalServiceDataMessage private constructor(
   data class PinnedMessage(val targetAuthor: ServiceId, val targetSentTimestamp: Long, val pinDurationInSeconds: Int?, val forever: Boolean?)
   data class UnpinnedMessage(val targetAuthor: ServiceId, val targetSentTimestamp: Long)
   data class AdminDelete(val targetAuthor: ServiceId, val targetSentTimestamp: Long)
+
+  enum class TopicContextAction { CREATE, RENAME, DELETE }
+  data class AddressableSourceMessage(val authorServiceId: ServiceId, val sentTimestamp: Long)
+  data class TopicContext(val topicId: String, val action: TopicContextAction, val name: String?, val sourceMessages: List<AddressableSourceMessage>)
 
   companion object {
     @JvmStatic

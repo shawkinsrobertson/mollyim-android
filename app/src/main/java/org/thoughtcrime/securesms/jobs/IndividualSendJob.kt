@@ -291,6 +291,8 @@ class IndividualSendJob private constructor(parameters: Parameters, private val 
       val pollCreate = getPollCreate(message)
       val pollTerminate = getPollTerminate(message)
       val pinnedMessage = getPinnedMessage(message)
+      val topicContext = getTopicContext(message)
+      val topicId = getTopicId(message)
       val mediaMessageBuilder = SignalServiceDataMessage.newBuilder()
         .withBody(message.body)
         .withAttachments(serviceAttachments)
@@ -309,6 +311,8 @@ class IndividualSendJob private constructor(parameters: Parameters, private val 
         .withPollCreate(pollCreate)
         .withPollTerminate(pollTerminate)
         .withPinnedMessage(pinnedMessage)
+        .withTopicContext(topicContext)
+        .withTopicId(topicId)
 
       if (message.parentStoryId != null) {
         try {

@@ -413,6 +413,22 @@ message DataMessage {
     optional uint64 targetSentTimestamp = 2;
   }
 
+  // Molly-only extension (topic threads). Deliberately not field 30 (the next sequential
+  // slot) -- see docs/topic-threads-design.md §9: this repo doesn't own this proto and
+  // upstream Signal-Android actively assigns sequential DataMessage fields, so Molly-only
+  // additions claim a high, out-of-the-way band instead of racing for the next slot.
+  message TopicContext {
+    enum Action {
+      CREATE = 0;
+      RENAME = 1;
+      DELETE = 2;
+    }
+    optional string topicId = 1;         // topic_uuid
+    optional Action action = 2;
+    optional string name = 3;            // for CREATE/RENAME
+    repeated AddressableMessage sourceMessages = 4; // messages copied in at CREATE time
+  }
+
   optional string body = 1;
   repeated AttachmentPointer attachments = 2;
   reserved /*groupV1*/ 3;
@@ -442,6 +458,10 @@ message DataMessage {
   optional UnpinMessage unpinMessage = 28;
   optional AdminDelete adminDelete = 29;
   // NEXT ID: 30
+
+  // Molly-only extensions, reserved band -- see TopicContext comment above.
+  optional TopicContext topicContext = 9001;
+  optional string topicId = 9002; // set on every message sent inside a topic thread
 }
 
 message NullMessage {
