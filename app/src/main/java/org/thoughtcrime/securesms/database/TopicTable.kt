@@ -158,6 +158,65 @@ class TopicTable(context: Context?, databaseHelper: SignalDatabase?) : DatabaseT
     }
   }
 
+  /**
+   * Creates a topic with a wire-provided [topicUuid] rather than generating a
+   * fresh one -- for the receive side of docs/topic-threads-design.md §6.1's
+   * `DataMessage.TopicContext{action=CREATE}` (a peer or another of the
+   * user's own linked devices started this topic). Idempotent: if a topic
+   * with [topicUuid] already exists (e.g. this is a redelivery, or both a
+   * `DataMessage.TopicContext` echo and a `SyncMessage.TopicSync` arrived for
+   * the same event), the existing record is returned rather than inserting a
+   * duplicate -- `topic_uuid`'s `UNIQUE` constraint is the source of truth
+   * either way.
+   *
+   * Deliberately does not enforce [MAX_ACTIVE_TOPICS_PER_THREAD] here -- per
+   * docs/topic-threads-design.md §9 open question #6, the cap is a
+   * client-side-only UX limit with no server-side authority, so a peer that
+   * doesn't respect it is handled by "display the first 6, degrade
+   * gracefully" rather than by refusing to record what they actually did.
+   */
+  fun createRemoteTopic(threadId: Long, topicUuid: String, name: String, createdTimestamp: Long = System.currentTimeMillis()): TopicRecord {
+    getTopicByUuid(topicUuid)?.let { return it }
+
+    return writableDatabase.withinTransaction { db ->
+      val existing = db
+        .select()
+        .from(TABLE_NAME)
+        .where("$TOPIC_UUID = ?", topicUuid)
+        .run()
+        .readToSingleObject { it.toTopicRecord() }
+      if (existing != null) return@withinTransaction existing
+
+      val activeCount = db
+        .select("COUNT(*)")
+        .from(TABLE_NAME)
+        .where("$THREAD_ID = ? AND $ACTIVE_WHERE", threadId)
+        .run()
+        .readToSingleInt()
+
+      val id = db.insertInto(TABLE_NAME)
+        .values(
+          TOPIC_UUID to topicUuid,
+          THREAD_ID to threadId,
+          NAME to name,
+          TOPIC_ORDER to activeCount,
+          CREATED_TIMESTAMP to createdTimestamp
+        )
+        .run()
+
+      TopicRecord(
+        id = id,
+        topicUuid = topicUuid,
+        threadId = threadId,
+        name = name,
+        order = activeCount,
+        anchorMessageId = null,
+        createdTimestamp = createdTimestamp,
+        deletedTimestamp = null
+      )
+    }
+  }
+
   /** Sets a topic's anchor message once it's been inserted. See [createTopic]. */
   fun setAnchorMessage(topicId: Long, anchorMessageId: Long) {
     writableDatabase

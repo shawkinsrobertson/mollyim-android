@@ -3250,6 +3250,14 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
       MESSAGE_EXTRAS to (retrieved.messageExtras?.encode())
     )
 
+    if (retrieved.topicUuid != null) {
+      // A peer/linked device can reference a topic this device hasn't recorded a CREATE for
+      // yet (redelivery ordering, or the DataMessage.TopicContext{CREATE} is still in flight) --
+      // degrade gracefully by leaving TOPIC_ID null (the message still renders in the parent
+      // timeline) rather than failing the whole insert, same spirit as QUOTE_MISSING.
+      topics.getTopicByUuid(retrieved.topicUuid)?.let { contentValues.put(TOPIC_ID, it.id) }
+    }
+
     val quoteAttachments: MutableList<Attachment> = mutableListOf()
     if (retrieved.quote != null) {
       contentValues.put(QUOTE_ID, retrieved.quote.id)

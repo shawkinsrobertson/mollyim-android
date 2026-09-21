@@ -39,11 +39,13 @@ import org.thoughtcrime.securesms.database.model.ParentStoryId.DirectReply
 import org.thoughtcrime.securesms.database.model.ParentStoryId.GroupReply
 import org.thoughtcrime.securesms.database.model.ReactionRecord
 import org.thoughtcrime.securesms.database.model.StickerRecord
+import org.thoughtcrime.securesms.database.model.TopicRecord
 import org.thoughtcrime.securesms.database.model.databaseprotos.BodyRangeList
 import org.thoughtcrime.securesms.database.model.databaseprotos.GiftBadge
 import org.thoughtcrime.securesms.database.model.databaseprotos.MessageExtras
 import org.thoughtcrime.securesms.database.model.databaseprotos.PinnedMessage
 import org.thoughtcrime.securesms.database.model.databaseprotos.PollTerminate
+import org.thoughtcrime.securesms.database.model.databaseprotos.TopicUpdate
 import org.thoughtcrime.securesms.database.model.toBodyRangeList
 import org.thoughtcrime.securesms.database.withAttachments
 import org.thoughtcrime.securesms.dependencies.AppDependencies
@@ -174,6 +176,10 @@ object DataMessageProcessor {
       message.payment != null -> insertResult = handlePayment(context, envelope, metadata, message, senderRecipient.id, receivedTime)
       message.storyContext != null -> insertResult = handleStoryReply(context, envelope, metadata, message, senderRecipient, groupId, receivedTime)
       message.giftBadge != null -> insertResult = handleGiftMessage(context, envelope, metadata, message, senderRecipient, threadRecipient.id, receivedTime)
+      // Must come before isMediaMessage/body -- a topic lifecycle notice carries a human-readable
+      // fallback body (docs/topic-threads-design.md §6.1) and would otherwise be swallowed by
+      // handleTextMessage before ever reaching this branch.
+      message.topicContext != null -> insertResult = handleTopicContext(context, envelope, metadata, message, senderRecipient, threadRecipient, groupId, receivedTime)
       message.isMediaMessage -> insertResult = handleMediaMessage(context, envelope, metadata, message, senderRecipient, threadRecipient, groupId, receivedTime, localMetrics, batchCache)
       message.body != null -> insertResult = handleTextMessage(context, envelope, metadata, message, senderRecipient, threadRecipient, groupId, receivedTime, localMetrics, batchCache)
       message.groupCallUpdate != null -> handleGroupCallUpdateMessage(envelope, senderRecipient.id, groupId)
@@ -849,7 +855,8 @@ object DataMessageProcessor {
         linkPreviews = linkPreviews,
         mentions = mentions,
         serverGuid = UuidUtil.getStringUUID(envelope.serverGuid, envelope.serverGuidBinary),
-        messageRanges = messageRanges
+        messageRanges = messageRanges,
+        topicUuid = message.topicId
       )
 
       insertResult = SignalDatabase.messages.insertMessageInbox(retrieved = mediaMessage, candidateThreadId = -1, skipThreadUpdate = batchCache.batchThreadUpdates).orNull()
@@ -935,7 +942,8 @@ object DataMessageProcessor {
       groupId = groupId,
       expiresIn = message.expireTimerDuration.inWholeMilliseconds,
       isUnidentified = metadata.sealedSender,
-      serverGuid = UuidUtil.getStringUUID(envelope.serverGuid, envelope.serverGuidBinary)
+      serverGuid = UuidUtil.getStringUUID(envelope.serverGuid, envelope.serverGuidBinary),
+      topicUuid = message.topicId
     )
 
     val insertResult: InsertResult? = SignalDatabase.messages.insertMessageInbox(textMessage, skipThreadUpdate = batchCache.batchThreadUpdates).orNull()
@@ -1160,6 +1168,134 @@ object DataMessageProcessor {
     AppDependencies.messageNotifier.updateNotification(context, ConversationId.fromMessageRecord(targetMessage))
 
     return messageId
+  }
+
+  /**
+   * Receive-side handling of docs/topic-threads-design.md §6.1's
+   * `DataMessage.TopicContext` -- a peer (or another of the user's own linked
+   * devices, before Phase A3's `SyncMessage.TopicSync` lands for the
+   * no-DataMessage-would-otherwise-be-sent case) created, renamed, or deleted
+   * a topic. Modeled on [handlePinMessage]/[handleAdminRemoteDelete]: resolve
+   * the target, apply the real local-state mutation via the already-shipped
+   * [org.thoughtcrime.securesms.database.TopicTable] methods, then insert the
+   * notice row the same way the local (self-authored) path in
+   * [MessageTable.insertTopicUpdateMessage] does, just attributed to the
+   * sender.
+   *
+   * No group-permission gate: any member may create/rename/delete a topic
+   * (unlike pin/admin-delete's admin check) -- topics are lighter-weight.
+   *
+   * Idempotent against redelivery/multi-device races: [TopicTable
+   * .createRemoteTopic] no-ops if [topicUuid] already exists, and
+   * RENAME/DELETE no-op (return null, no notice inserted) if the local state
+   * already reflects the requested change.
+   *
+   * Known gap, deliberately out of scope for this pass: `topicContext
+   * .sourceMessages` (the messages the topic was started from, per §6.1) is
+   * not yet resolved back to local rows and copied in via
+   * [MessageTable.copyMessageIntoTopic] on the receive side -- that needs
+   * resolving each `AddressableMessage` (author + sentTimestamp) to a local
+   * message id first, which this device may not have (or may not have yet)
+   * if it wasn't already part of the parent-timeline history. A peer's
+   * created-from-selection topic will still show up correctly here with its
+   * anchor notice; it just won't carry the copied-in source messages this
+   * device didn't already have.
+   */
+  fun handleTopicContext(
+    context: Context,
+    envelope: Envelope,
+    metadata: EnvelopeMetadata,
+    message: DataMessage,
+    senderRecipient: Recipient,
+    threadRecipient: Recipient,
+    groupId: GroupId.V2?,
+    receivedTime: Long
+  ): InsertResult? {
+    val topicContext = message.topicContext!!
+    val topicUuid = topicContext.topicId
+    val action = topicContext.action
+
+    if (topicUuid == null || action == null) {
+      warn(envelope.clientTimestamp!!, "[handleTopicContext] Missing topicId/action! Ignoring.")
+      return null
+    }
+
+    log(envelope.clientTimestamp!!, "[handleTopicContext] $action for topic $topicUuid")
+
+    handlePossibleExpirationUpdate(envelope, metadata, senderRecipient, threadRecipient, groupId, message.expireTimerDuration, message.expireTimerVersion, receivedTime)
+
+    val threadId = SignalDatabase.threads.getOrCreateThreadIdFor(threadRecipient)
+
+    val (topic: TopicRecord, kind: TopicUpdate.Kind) = when (action) {
+      DataMessage.TopicContext.Action.CREATE -> {
+        val name = topicContext.name
+        if (name.isNullOrEmpty()) {
+          warn(envelope.clientTimestamp!!, "[handleTopicContext] CREATE missing name! Ignoring.")
+          return null
+        }
+        SignalDatabase.topics.createRemoteTopic(threadId, topicUuid, name, envelope.clientTimestamp!!) to TopicUpdate.Kind.STARTED
+      }
+      DataMessage.TopicContext.Action.RENAME -> {
+        val existing = SignalDatabase.topics.getTopicByUuid(topicUuid)
+        val name = topicContext.name
+        if (existing == null || name.isNullOrEmpty()) {
+          warn(envelope.clientTimestamp!!, "[handleTopicContext] RENAME for unknown topic or missing name! Ignoring.")
+          return null
+        }
+        if (existing.isDeleted || existing.name == name) {
+          return null
+        }
+        if (!SignalDatabase.topics.renameTopic(existing.id, name)) {
+          return null
+        }
+        existing.copy(name = name) to TopicUpdate.Kind.RENAMED
+      }
+      DataMessage.TopicContext.Action.DELETE -> {
+        val existing = SignalDatabase.topics.getTopicByUuid(topicUuid)
+        if (existing == null || existing.isDeleted) {
+          return null
+        }
+        if (!SignalDatabase.topics.deleteTopic(existing.id)) {
+          return null
+        }
+        existing to TopicUpdate.Kind.DELETED
+      }
+    }
+
+    // The sender already built the human-readable fallback text (design doc §6.1, e.g.
+    // "Topic renamed: Weekend Trip Planning -> Trip Logistics") into the DataMessage body for
+    // stock-Signal recipients -- reuse it verbatim rather than re-deriving it locally, which
+    // would need the topic's previous name (not carried on TopicContext; only the new [name] is).
+    val body = message.body ?: topic.name
+
+    val messageExtras = MessageExtras(
+      topicUpdate = TopicUpdate(
+        kind = kind,
+        topicUuid = topic.topicUuid,
+        name = topic.name
+      )
+    )
+
+    val incomingMessage = IncomingMessage(
+      type = MessageType.NORMAL,
+      from = senderRecipient.id,
+      sentTimeMillis = envelope.clientTimestamp!!,
+      serverTimeMillis = envelope.serverTimestamp!!,
+      receivedTimeMillis = receivedTime,
+      body = body,
+      groupId = groupId,
+      isUnidentified = metadata.sealedSender,
+      serverGuid = UuidUtil.getStringUUID(envelope.serverGuid, envelope.serverGuidBinary),
+      messageExtras = messageExtras
+    )
+
+    val insertResult = SignalDatabase.messages.insertMessageInbox(incomingMessage).orNull()
+
+    if (insertResult != null && action == DataMessage.TopicContext.Action.CREATE) {
+      SignalDatabase.topics.setAnchorMessage(topic.id, insertResult.messageId)
+    }
+
+    return insertResult
   }
 
   fun handlePinMessage(
