@@ -1277,7 +1277,7 @@ object DataMessageProcessor {
     )
 
     val incomingMessage = IncomingMessage(
-      type = MessageType.NORMAL,
+      type = MessageType.TOPIC_UPDATE,
       from = senderRecipient.id,
       sentTimeMillis = envelope.clientTimestamp!!,
       serverTimeMillis = envelope.serverTimestamp!!,

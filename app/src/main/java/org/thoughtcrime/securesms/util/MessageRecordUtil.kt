@@ -95,6 +95,8 @@ fun MessageRecord.hasPollTerminate(): Boolean = this.isPollTerminate && this.mes
 
 fun MessageRecord.hasPinnedMessageUpdate(): Boolean = this.isPinnedMessageUpdate && this.messageExtras != null && this.messageExtras!!.pinnedMessage != null
 
+fun MessageRecord.hasTopicUpdate(): Boolean = this.isTopicUpdate && this.messageExtras != null && this.messageExtras!!.topicUpdate != null
+
 fun MessageRecord.hasBigImageLinkPreview(context: Context): Boolean {
   if (!hasLinkPreview()) {
     return false
