@@ -92,10 +92,10 @@ class TopicThreadViewModel(private val threadId: Long, private val topicId: Long
     }
   }
 
-  fun deleteTopic() {
+  fun deleteTopic(isFullDelete: Boolean) {
     viewModelScope.launch {
       withContext(Dispatchers.IO) {
-        SignalDatabase.messages.endTopic(threadId, topicId)
+        SignalDatabase.messages.endTopic(threadId, topicId, isFullDelete)
       }
       internalUiState.update { it.copy(isFinished = true) }
     }
