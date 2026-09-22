@@ -127,6 +127,7 @@ import org.thoughtcrime.securesms.database.model.databaseprotos.TopicSourceMessa
 import org.thoughtcrime.securesms.database.model.databaseprotos.TopicUpdate
 import org.thoughtcrime.securesms.dependencies.AppDependencies
 import org.thoughtcrime.securesms.groups.GroupMigrationMembershipChange
+import org.thoughtcrime.securesms.jobs.MultiDeviceTopicSyncJob
 import org.thoughtcrime.securesms.jobs.OptimizeMessageSearchIndexJob
 import org.thoughtcrime.securesms.jobs.ThreadUpdateJob
 import org.thoughtcrime.securesms.jobs.TrimThreadJob
@@ -1184,6 +1185,10 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
     }
     topics.recordSourceMessages(topic.id, sourceMessageIds)
 
+    threads.getRecipientForThreadId(threadId)?.let { threadRecipient ->
+      MultiDeviceTopicSyncJob.enqueueCreate(threadRecipient, topic.topicUuid, topic.name)
+    }
+
     return topic
   }
 
@@ -1199,6 +1204,11 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
     if (!renamed) return false
 
     insertTopicUpdateMessage(threadId, topic.copy(name = newName), TopicUpdate.Kind.RENAMED, previousName = topic.name)
+
+    threads.getRecipientForThreadId(threadId)?.let { threadRecipient ->
+      MultiDeviceTopicSyncJob.enqueueRename(threadRecipient, topic.topicUuid, newName)
+    }
+
     return true
   }
 
@@ -1211,18 +1221,33 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
    * deleted) -- they simply stop being reachable through any active-topics
    * query once the topic is tombstoned.
    *
-   * Phase 1 note: the design doc's "Delete for me" vs "Delete for everyone"
-   * distinction is a wire-protocol/sync concern (§6.3/§7) that doesn't exist
-   * yet -- both currently perform this same local-only operation. The caller
-   * (the topic thread screen) still presents both options so the UI/UX is in
-   * place ahead of that phase landing.
+   * Per docs/topic-threads-design.md §6.3/§7, [isFullDelete] controls what
+   * actually propagates: **"Delete for me"** (`isFullDelete = false`) only
+   * syncs to the user's own linked devices (`SyncMessage.TopicSync`) --
+   * deliberately does **not** send a `DataMessage.TopicContext{DELETE}` to
+   * the peer, since the peer's own copy of the topic isn't supposed to be
+   * affected by a delete the user only meant for themselves. **"Delete for
+   * everyone"** (`isFullDelete = true`) sends both: the peer-facing lifecycle
+   * notice (so every Molly-aware device tombstones the topic) and the
+   * own-device sync.
    */
-  fun endTopic(threadId: Long, topicId: Long): Boolean {
+  fun endTopic(threadId: Long, topicId: Long, isFullDelete: Boolean): Boolean {
     val topic = topics.getTopic(topicId) ?: return false
     if (topic.isDeleted) return false
 
-    insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.DELETED)
-    return topics.deleteTopic(topicId)
+    if (isFullDelete) {
+      insertTopicUpdateMessage(threadId, topic, TopicUpdate.Kind.DELETED)
+    }
+
+    val deleted = topics.deleteTopic(topicId)
+
+    if (deleted) {
+      threads.getRecipientForThreadId(threadId)?.let { threadRecipient ->
+        MultiDeviceTopicSyncJob.enqueueDelete(threadRecipient, topic.topicUuid, isFullDelete)
+      }
+    }
+
+    return deleted
   }
 
   /**
@@ -3250,6 +3275,14 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
       MESSAGE_EXTRAS to (retrieved.messageExtras?.encode())
     )
 
+    if (retrieved.topicUuid != null) {
+      // A peer/linked device can reference a topic this device hasn't recorded a CREATE for
+      // yet (redelivery ordering, or the DataMessage.TopicContext{CREATE} is still in flight) --
+      // degrade gracefully by leaving TOPIC_ID null (the message still renders in the parent
+      // timeline) rather than failing the whole insert, same spirit as QUOTE_MISSING.
+      topics.getTopicByUuid(retrieved.topicUuid)?.let { contentValues.put(TOPIC_ID, it.id) }
+    }
+
     val quoteAttachments: MutableList<Attachment> = mutableListOf()
     if (retrieved.quote != null) {
       contentValues.put(QUOTE_ID, retrieved.quote.id)
@@ -3646,6 +3679,14 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
         throw MmsException("Cannot insert message with multiple special types.")
       }
       type = type or MessageTypes.SPECIAL_TYPE_PINNED_MESSAGE
+      hasSpecialType = true
+    }
+
+    if (message.messageExtras?.topicUpdate != null) {
+      if (hasSpecialType) {
+        throw MmsException("Cannot insert message with multiple special types.")
+      }
+      type = type or MessageTypes.SPECIAL_TYPE_TOPIC_UPDATE
       hasSpecialType = true
     }
 
@@ -6458,6 +6499,7 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
       MessageType.IDENTITY_DEFAULT -> MessageTypes.KEY_EXCHANGE_IDENTITY_DEFAULT_BIT or MessageTypes.BASE_INBOX_TYPE
       MessageType.POLL_TERMINATE -> MessageTypes.SPECIAL_TYPE_POLL_TERMINATE or MessageTypes.BASE_INBOX_TYPE
       MessageType.PINNED_MESSAGE -> MessageTypes.SPECIAL_TYPE_PINNED_MESSAGE or MessageTypes.BASE_INBOX_TYPE
+      MessageType.TOPIC_UPDATE -> MessageTypes.SPECIAL_TYPE_TOPIC_UPDATE or MessageTypes.BASE_INBOX_TYPE
       MessageType.GROUP_UPDATE -> {
         val isOnlyGroupLeave = this.groupContext?.let { GroupV2UpdateMessageUtil.isJustAGroupLeave(it) } ?: false
 

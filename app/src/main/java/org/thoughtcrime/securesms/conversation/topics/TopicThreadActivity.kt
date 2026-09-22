@@ -193,8 +193,8 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
     MaterialAlertDialogBuilder(this)
       .setTitle(getString(R.string.ConversationTopics__delete_topic_question, topicName))
       .setMessage(R.string.ConversationTopics__delete_topic_body)
-      .setNegativeButton(R.string.ConversationTopics__delete_for_me) { _, _ -> viewModel.deleteTopic() }
-      .setPositiveButton(R.string.ConversationTopics__delete_for_everyone) { _, _ -> viewModel.deleteTopic() }
+      .setNegativeButton(R.string.ConversationTopics__delete_for_me) { _, _ -> viewModel.deleteTopic(isFullDelete = false) }
+      .setPositiveButton(R.string.ConversationTopics__delete_for_everyone) { _, _ -> viewModel.deleteTopic(isFullDelete = true) }
       .show()
   }
 }

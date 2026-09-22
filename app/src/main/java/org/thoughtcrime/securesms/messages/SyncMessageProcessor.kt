@@ -50,11 +50,13 @@ import org.thoughtcrime.securesms.database.model.ParentStoryId.DirectReply
 import org.thoughtcrime.securesms.database.model.ParentStoryId.GroupReply
 import org.thoughtcrime.securesms.database.model.StickerPackId
 import org.thoughtcrime.securesms.database.model.StoryType
+import org.thoughtcrime.securesms.database.model.TopicRecord
 import org.thoughtcrime.securesms.database.model.databaseprotos.BodyRangeList
 import org.thoughtcrime.securesms.database.model.databaseprotos.GiftBadge
 import org.thoughtcrime.securesms.database.model.databaseprotos.MessageExtras
 import org.thoughtcrime.securesms.database.model.databaseprotos.PinnedMessage
 import org.thoughtcrime.securesms.database.model.databaseprotos.PollTerminate
+import org.thoughtcrime.securesms.database.model.databaseprotos.TopicUpdate
 import org.thoughtcrime.securesms.database.model.toBodyRangeList
 import org.thoughtcrime.securesms.database.withAttachments
 import org.thoughtcrime.securesms.dependencies.AppDependencies
@@ -189,6 +191,7 @@ object SyncMessageProcessor {
       syncMessage.attachmentBackfillRequest != null -> handleSynchronizeAttachmentBackfillRequest(syncMessage.attachmentBackfillRequest!!, envelope.clientTimestamp!!)
       syncMessage.attachmentBackfillResponse != null -> handleSynchronizeAttachmentBackfillResponse(syncMessage.attachmentBackfillResponse!!, envelope.clientTimestamp!!)
       syncMessage.usernameChange != null -> handleSynchronizeUsernameChange(envelope.clientTimestamp!!)
+      syncMessage.topicSync != null -> handleSynchronizeTopicSync(syncMessage.topicSync!!, envelope.clientTimestamp!!)
       else -> warn(envelope.clientTimestamp!!, "Contains no known sync types...")
     }
   }
@@ -272,6 +275,7 @@ object SyncMessageProcessor {
           DataMessageProcessor.handleAdminRemoteDelete(context, envelope, dataMessage, senderRecipient, threadRecipient, earlyMessageCacheEntry)
           threadId = SignalDatabase.threads.getOrCreateThreadIdFor(getSyncMessageDestination(sent))
         }
+        dataMessage.topicContext != null -> threadId = handleSynchronizeSentTopicContext(sent, envelope.clientTimestamp!!)
         else -> threadId = handleSynchronizeSentTextMessage(sent, envelope.clientTimestamp!!)
       }
 
@@ -857,7 +861,8 @@ object SyncMessageProcessor {
       mentions = mentions,
       giftBadge = giftBadge,
       bodyRanges = bodyRanges,
-      isSecure = true
+      isSecure = true,
+      topicId = dataMessage.topicId
     )
 
     if (syncDestinationRecipient.expiresInSeconds != dataMessage.expireTimerDuration.inWholeSeconds.toInt() || ((dataMessage.expireTimerVersion ?: -1) > syncDestinationRecipient.expireTimerVersion)) {
@@ -912,6 +917,95 @@ object SyncMessageProcessor {
     return threadId
   }
 
+  /**
+   * Own-device echo of a topic lifecycle event (docs/topic-threads-design.md §6.1) sent from
+   * *another* of the user's own linked devices -- delivered via the standard "sent transcript"
+   * mechanism (`Sent.message`), the same path [handleSynchronizeSentTextMessage]/
+   * [handleSynchronizeSentMediaMessage] use for ordinary own-device message sync. This, not
+   * `SyncMessage.TopicSync` (§6.3), is how a linked device learns about a topic create/rename/
+   * "delete for everyone" that was sent as a real `DataMessage.TopicContext` to a peer -- it
+   * already gets echoed here like any other sent message. `TopicSync` exists for the case this
+   * path doesn't cover: an event where no `DataMessage` goes to a peer at all (delete-for-me).
+   *
+   * Applies the same local topic mutation as [DataMessageProcessor.handleTopicContext], but
+   * inserts the notice via [MessageTable.insertMessageOutbox] (this is the user's own sent
+   * message, just recorded on a different device) rather than [MessageTable.insertMessageInbox].
+   */
+  private fun handleSynchronizeSentTopicContext(sent: Sent, envelopeTimestamp: Long): Long {
+    val dataMessage: DataMessage = sent.message!!
+    val topicContext = dataMessage.topicContext!!
+    val topicUuid = topicContext.topicId
+    val action = topicContext.action
+
+    if (topicUuid == null || action == null) {
+      warn(envelopeTimestamp, "[handleSynchronizeSentTopicContext] Missing topicId/action! Ignoring.")
+      return -1L
+    }
+
+    val recipient = getSyncMessageDestination(sent)
+    val threadId = SignalDatabase.threads.getOrCreateThreadIdFor(recipient)
+
+    val (topic: TopicRecord, kind: TopicUpdate.Kind) = when (action) {
+      DataMessage.TopicContext.Action.CREATE -> {
+        val name = topicContext.name
+        if (name.isNullOrEmpty()) {
+          warn(envelopeTimestamp, "[handleSynchronizeSentTopicContext] CREATE missing name! Ignoring.")
+          return -1L
+        }
+        SignalDatabase.topics.createRemoteTopic(threadId, topicUuid, name, envelopeTimestamp) to TopicUpdate.Kind.STARTED
+      }
+      DataMessage.TopicContext.Action.RENAME -> {
+        val existing = SignalDatabase.topics.getTopicByUuid(topicUuid)
+        val name = topicContext.name
+        if (existing == null || name.isNullOrEmpty() || existing.isDeleted || existing.name == name) {
+          return -1L
+        }
+        if (!SignalDatabase.topics.renameTopic(existing.id, name)) {
+          return -1L
+        }
+        existing.copy(name = name) to TopicUpdate.Kind.RENAMED
+      }
+      DataMessage.TopicContext.Action.DELETE -> {
+        val existing = SignalDatabase.topics.getTopicByUuid(topicUuid)
+        if (existing == null || existing.isDeleted) {
+          return -1L
+        }
+        if (!SignalDatabase.topics.deleteTopic(existing.id)) {
+          return -1L
+        }
+        existing to TopicUpdate.Kind.DELETED
+      }
+    }
+
+    val body = dataMessage.body ?: topic.name
+    val messageExtras = MessageExtras(topicUpdate = TopicUpdate(kind = kind, topicUuid = topic.topicUuid, name = topic.name))
+    val outgoing = OutgoingMessage(
+      threadRecipient = recipient,
+      sentTimeMillis = sent.timestamp!!,
+      body = body,
+      isSecure = true,
+      messageExtras = messageExtras
+    )
+
+    val messageId: Long
+    if (recipient.isGroup) {
+      messageId = SignalDatabase.messages.insertMessageOutbox(outgoing, threadId, false, GroupReceiptTable.STATUS_UNKNOWN, null).messageId
+      updateGroupReceiptStatus(sent, messageId, recipient.requireGroupId())
+    } else {
+      messageId = SignalDatabase.messages.insertMessageOutbox(outgoing, threadId, false, null).messageId
+      SignalDatabase.messages.markUnidentified(messageId, sent.isUnidentified(recipient.serviceId.orNull()))
+    }
+
+    log(envelopeTimestamp, "Inserted sync topic context as messageId $messageId")
+    SignalDatabase.messages.markAsSent(messageId)
+
+    if (action == DataMessage.TopicContext.Action.CREATE) {
+      SignalDatabase.topics.setAnchorMessage(topic.id, messageId)
+    }
+
+    return threadId
+  }
+
   @Throws(MmsException::class, BadGroupIdException::class)
   private fun handleSynchronizeSentTextMessage(sent: Sent, envelopeTimestamp: Long): Long {
     log(envelopeTimestamp, "Synchronize sent text message for " + sent.timestamp!!)
@@ -937,13 +1031,14 @@ object SyncMessageProcessor {
         timestamp = sent.timestamp!!,
         expiresIn = expiresInMillis,
         isSecure = true,
-        bodyRanges = bodyRanges
+        bodyRanges = bodyRanges,
+        topicId = dataMessage.topicId
       )
 
       messageId = SignalDatabase.messages.insertMessageOutbox(outgoingMessage, threadId, false, GroupReceiptTable.STATUS_UNKNOWN, null).messageId
       updateGroupReceiptStatus(sent, messageId, recipient.requireGroupId())
     } else {
-      val outgoingTextMessage = OutgoingMessage.text(threadRecipient = recipient, body = body, expiresIn = expiresInMillis, sentTimeMillis = sent.timestamp!!, bodyRanges = bodyRanges)
+      val outgoingTextMessage = OutgoingMessage.text(threadRecipient = recipient, body = body, expiresIn = expiresInMillis, sentTimeMillis = sent.timestamp!!, bodyRanges = bodyRanges).copy(topicId = dataMessage.topicId)
       messageId = SignalDatabase.messages.insertMessageOutbox(outgoingTextMessage, threadId, false, null).messageId
       SignalDatabase.messages.markUnidentified(messageId, sent.isUnidentified(recipient.serviceId.orNull()))
     }
@@ -2112,6 +2207,58 @@ object SyncMessageProcessor {
     log(timestamp, "[handleSynchronizeUsernameChange] Synchronize username change. Resetting KT.")
 
     KeyTransparencyApi.reset(aci = SignalStore.account.requireAci().libSignalAci, field = KeyTransparency.AccountDataField.USERNAME_HASH, keyTransparencyStore = KeyTransparencyStore)
+  }
+
+  /**
+   * Receive-side handling of docs/topic-threads-design.md §6.3's `SyncMessage.TopicSync` --
+   * applies the topic-table mutation only (create/rename/tombstone), deliberately **not**
+   * inserting any notice message row: a visible notice, if one exists for this event, already
+   * arrived (or will arrive) via [handleTopicContext] (a peer's `DataMessage.TopicContext`) or
+   * [handleSynchronizeSentTopicContext] (this account's own sent-transcript echo of a
+   * `DataMessage.TopicContext` it sent from another device) -- `TopicSync` exists specifically
+   * for the "delete for me" case where neither of those ever fires (no `DataMessage` goes
+   * anywhere for a delete the user only meant for themselves), so this is the *only* mechanism
+   * that reaches this device for that case. For creates/renames, this is deliberately redundant
+   * with the sent-transcript path (per the design doc: sent "regardless of whether the lifecycle
+   * DataMessage above also went to the peer") -- [TopicTable.createRemoteTopic]/[renameTopic]/
+   * [deleteTopic] are all idempotent/no-op against an already-applied change, so processing both
+   * is safe.
+   */
+  private fun handleSynchronizeTopicSync(topicSync: SyncMessage.TopicSync, envelopeTimestamp: Long) {
+    for (create in topicSync.creates) {
+      val topicId = create.topicId
+      val name = create.name
+      val recipientId = create.conversation?.toRecipientId()
+      if (topicId == null || name.isNullOrEmpty() || recipientId == null) {
+        warn(envelopeTimestamp, "[handleSynchronizeTopicSync] Skipping malformed create.")
+        continue
+      }
+      val threadId = SignalDatabase.threads.getOrCreateThreadIdFor(Recipient.resolved(recipientId))
+      SignalDatabase.topics.createRemoteTopic(threadId, topicId, name)
+    }
+
+    for (rename in topicSync.renames) {
+      val topicId = rename.topicId
+      val name = rename.name
+      if (topicId == null || name.isNullOrEmpty()) {
+        warn(envelopeTimestamp, "[handleSynchronizeTopicSync] Skipping malformed rename.")
+        continue
+      }
+      val existing = SignalDatabase.topics.getTopicByUuid(topicId)
+      if (existing == null || existing.isDeleted || existing.name == name) {
+        continue
+      }
+      SignalDatabase.topics.renameTopic(existing.id, name)
+    }
+
+    for (delete in topicSync.deletes) {
+      val topicId = delete.topicId ?: continue
+      val existing = SignalDatabase.topics.getTopicByUuid(topicId)
+      if (existing == null || existing.isDeleted) {
+        continue
+      }
+      SignalDatabase.topics.deleteTopic(existing.id)
+    }
   }
 
   private fun ConversationIdentifier.toRecipientId(): RecipientId? {

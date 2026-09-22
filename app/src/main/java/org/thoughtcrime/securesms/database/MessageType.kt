@@ -48,5 +48,8 @@ enum class MessageType {
   POLL_TERMINATE,
 
   /** A message has been pinned **/
-  PINNED_MESSAGE
+  PINNED_MESSAGE,
+
+  /** A topic was started, renamed, or deleted -- see docs/topic-threads-design.md §6.1 */
+  TOPIC_UPDATE
 }

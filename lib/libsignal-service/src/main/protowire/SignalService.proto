@@ -872,6 +872,36 @@ message SyncMessage {
 
   message UsernameChange {}
 
+  // Molly-only extension (topic threads) -- see the TopicContext comment on DataMessage for why
+  // this claims a high, out-of-the-way field number (9001) instead of the next sequential slot.
+  // Sent any time a topic is created, renamed, or deleted, so the change reaches the user's own
+  // linked devices even when no DataMessage.TopicContext would otherwise go to a peer (e.g.
+  // renaming a topic in a chat the user isn't actively messaging in). Mirrors DeleteForMe's shape
+  // (ConversationIdentifier + AddressableMessage).
+  message TopicSync {
+    message Create {
+      optional ConversationIdentifier conversation = 1;
+      optional string topicId = 2;
+      optional string name = 3;
+      repeated AddressableMessage sourceMessages = 4;
+      optional AddressableMessage anchorMessage = 5;
+    }
+    message Rename {
+      optional ConversationIdentifier conversation = 1;
+      optional string topicId = 2;
+      optional string name = 3;
+    }
+    message Delete {
+      optional ConversationIdentifier conversation = 1;
+      optional string topicId = 2;
+      optional bool isFullDelete = 3; // false = "delete for me" (this device only), true = "delete for everyone"
+    }
+
+    repeated Create creates = 1;
+    repeated Rename renames = 2;
+    repeated Delete deletes = 3;
+  }
+
   oneof content {
     Sent sent = 1;
     Contacts contacts = 2;
@@ -893,6 +923,7 @@ message SyncMessage {
     AttachmentBackfillRequest attachmentBackfillRequest = 24;
     AttachmentBackfillResponse attachmentBackfillResponse = 25;
     UsernameChange usernameChange = 26;
+    TopicSync topicSync = 9001; // Molly-only extension, reserved band -- see TopicSync comment above.
   }
 
   reserved /*groups*/ 3;

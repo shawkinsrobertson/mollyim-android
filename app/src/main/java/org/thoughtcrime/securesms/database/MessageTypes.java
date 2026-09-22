@@ -51,7 +51,11 @@ public interface MessageTypes {
   long THREAD_MERGE_TYPE                     = 16;
   long SMS_EXPORT_TYPE                       = 17;
   long SESSION_SWITCHOVER_TYPE               = 18;
-  long TOPIC_UPDATE_TYPE                     = 19;
+  // 19 is free again -- topic threads (Phase 1) originally claimed it as a base type, but ended
+  // up using SPECIAL_TYPE_TOPIC_UPDATE instead (see below): a real sent/received topic notice
+  // still needs a normal delivery-state base type (sent/pending/failed), the same reason pinned-
+  // message/poll-terminate notices layer their own special type on top of a normal base type
+  // rather than replacing it.
 
   long BASE_INBOX_TYPE                    = 20;
   long BASE_OUTBOX_TYPE                   = 21;
@@ -125,6 +129,12 @@ public interface MessageTypes {
   long SPECIAL_TYPE_UNBLOCKED                 = 0xB00000000L;
   long SPECIAL_TYPE_POLL_TERMINATE            = 0xC00000000L;
   long SPECIAL_TYPE_PINNED_MESSAGE            = 0xD00000000L;
+  // 0xE00000000L is free. Molly-only extension (topic threads) claims the last available slot
+  // (0xF) rather than the next sequential one, for the same upstream-merge-collision reasoning
+  // docs/topic-threads-design.md §9 gives for the wire-protocol field numbers: this SQLite-local
+  // bit isn't synced anywhere, but Molly does periodically merge from upstream Signal-Android,
+  // which could sequentially claim 0xE next for an unrelated feature.
+  long SPECIAL_TYPE_TOPIC_UPDATE              = 0xF00000000L;
 
   long IGNORABLE_TYPESMASK_WHEN_COUNTING = END_SESSION_BIT | KEY_EXCHANGE_IDENTITY_UPDATE_BIT | KEY_EXCHANGE_IDENTITY_VERIFIED_BIT;
 
@@ -174,6 +184,10 @@ public interface MessageTypes {
 
   static boolean isPinnedMessageUpdate(long type) {
     return (type & SPECIAL_TYPES_MASK) == SPECIAL_TYPE_PINNED_MESSAGE;
+  }
+
+  static boolean isTopicUpdate(long type) {
+    return (type & SPECIAL_TYPES_MASK) == SPECIAL_TYPE_TOPIC_UPDATE;
   }
 
   static boolean isDraftMessageType(long type) {

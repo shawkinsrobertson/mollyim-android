@@ -41,7 +41,8 @@ class IncomingMessage(
   val giftBadge: GiftBadge? = null,
   val messageExtras: MessageExtras? = null,
   val isNotifiable: Boolean = false,
-  val poll: Poll? = null
+  val poll: Poll? = null,
+  val topicUuid: String? = null
 ) {
 
   val attachments: List<Attachment> = ArrayList(attachments)

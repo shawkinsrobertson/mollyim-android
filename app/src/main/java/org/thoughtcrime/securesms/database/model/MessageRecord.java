@@ -320,6 +320,13 @@ public abstract class MessageRecord extends DisplayRecord {
     } else if (MessageRecordUtil.hasPinnedMessageUpdate(this)) {
      return getFromRecipient().isSelf() ? staticUpdateDescriptionWithExpiration(context.getString(R.string.PinnedMessage__you_pinned_a_message), Glyph.PIN)
                                         : staticUpdateDescriptionWithExpiration(context.getString(R.string.PinnedMessage__s_pinned_a_message, getFromRecipient().getDisplayName(context)), Glyph.PIN);
+    } else if (MessageRecordUtil.hasTopicUpdate(this)) {
+      // The body was already fully rendered (with correct "you"/other-party phrasing) at insert
+      // time from the same TopicThread__started_notice/renamed_notice/deleted_notice resources
+      // this reuses -- see MessageTable.insertTopicUpdateMessage and
+      // DataMessageProcessor.handleTopicContext. Only the presentation (a system line instead of
+      // a plain chat bubble) changes here.
+      return staticUpdateDescription(getBody(), Glyph.THREAD);
     }
 
     return null;
@@ -743,6 +750,10 @@ public abstract class MessageRecord extends DisplayRecord {
     return MessageTypes.isSessionSwitchoverType(type);
   }
 
+  public boolean isTopicUpdate() {
+    return MessageTypes.isTopicUpdate(type);
+  }
+
   public boolean isSmsExportType() {
     return MessageTypes.isSmsExport(type);
   }
@@ -765,7 +776,7 @@ public abstract class MessageRecord extends DisplayRecord {
            isProfileChange() || isGroupV1MigrationEvent() || isChatSessionRefresh() || isBadDecryptType() ||
            isChangeNumber() || isReleaseChannelDonationRequest() || isThreadMergeEventType() || isSmsExportType() || isSessionSwitchoverEventType() ||
            isPaymentsRequestToActivate() || isPaymentsActivated() || isReportedSpam() || isMessageRequestAccepted() ||
-           isBlocked() || isUnblocked() || isUnsupported() || isPollTerminate() || isPinnedMessageUpdate();
+           isBlocked() || isUnblocked() || isUnsupported() || isPollTerminate() || isPinnedMessageUpdate() || isTopicUpdate();
   }
 
   public boolean isMediaPending() {
