@@ -58,12 +58,12 @@
         layout="@layout/conversation_input_panel"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        app:layout_constraintBottom_toTopOf="@id/topic_thread_input_container"
+        app:layout_constraintBottom_toTopOf="@id/input_container"
         app:layout_constraintEnd_toEndOf="@id/parent_end_guideline"
         app:layout_constraintStart_toStartOf="@id/parent_start_guideline" />
 
     <androidx.fragment.app.FragmentContainerView
-        android:id="@+id/topic_thread_input_container"
+        android:id="@+id/input_container"
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintBottom_toBottomOf="@id/navigation_bar_guideline"
