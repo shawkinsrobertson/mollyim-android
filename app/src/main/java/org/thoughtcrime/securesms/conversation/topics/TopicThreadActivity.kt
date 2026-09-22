@@ -5,6 +5,7 @@
 
 package org.thoughtcrime.securesms.conversation.topics
 
+import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -30,23 +31,31 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.signal.core.models.media.Media
+import org.signal.core.ui.permissions.Permissions
 import org.thoughtcrime.securesms.PassphraseRequiredActivity
 import org.thoughtcrime.securesms.R
+import org.thoughtcrime.securesms.audio.AudioRecorder
 import org.thoughtcrime.securesms.components.AnimatingToggle
 import org.thoughtcrime.securesms.components.ComposeText
+import org.thoughtcrime.securesms.components.HidingLinearLayout
 import org.thoughtcrime.securesms.components.InputAwareConstraintLayout
 import org.thoughtcrime.securesms.components.InputPanel
 import org.thoughtcrime.securesms.components.SendButton
 import org.thoughtcrime.securesms.components.recyclerview.SmoothScrollingLinearLayoutManager
+import org.thoughtcrime.securesms.components.voice.VoiceNoteDraft
+import org.thoughtcrime.securesms.components.voice.VoiceNoteMediaController
+import org.thoughtcrime.securesms.components.voice.VoiceNoteMediaControllerOwner
 import org.thoughtcrime.securesms.conversation.AttachmentKeyboardButton
 import org.thoughtcrime.securesms.conversation.ConversationAdapter
 import org.thoughtcrime.securesms.conversation.MessageSendType
 import org.thoughtcrime.securesms.conversation.colors.ColorizerV1
 import org.thoughtcrime.securesms.conversation.colors.RecyclerViewColorizer
+import org.thoughtcrime.securesms.conversation.v2.VoiceMessageRecordingDelegate
 import org.thoughtcrime.securesms.database.SignalDatabase
 import org.thoughtcrime.securesms.database.model.StickerRecord
 import org.thoughtcrime.securesms.mediasend.MediaSendActivityResult
 import org.thoughtcrime.securesms.mediasend.v2.MediaSelectionActivity
+import org.thoughtcrime.securesms.mms.AudioSlide
 import org.thoughtcrime.securesms.mms.DocumentSlide
 import org.thoughtcrime.securesms.mms.GifSlide
 import org.thoughtcrime.securesms.mms.ImageSlide
@@ -74,19 +83,28 @@ import java.util.Locale
  * via [TopicAttachmentKeyboardFragment], shown in the `R.id.input_container` fragment slot that
  * [org.thoughtcrime.securesms.components.InputAwareConstraintLayout.toggleInput] always targets.
  * Only Gallery and File attachments are wired up so far -- Contact/Location/Poll are filtered out
- * of the sheet rather than left as dead buttons (see [TopicAttachmentKeyboardFragment]). Voice
- * notes are Phase B3, not yet implemented.
+ * of the sheet rather than left as dead buttons (see [TopicAttachmentKeyboardFragment]).
+ *
+ * Voice notes (Phase B3) reuse [org.thoughtcrime.securesms.conversation.v2.VoiceMessageRecordingDelegate]
+ * and [VoiceNoteMediaController] unmodified. `VoiceMessageRecordingDelegate` requires a real
+ * `Fragment` (not just an `Activity`), so a small headless [TopicVoiceRecordingHostFragment] bridges
+ * that gap without editing the shared delegate class. Voice-note drafts are **not** persisted to
+ * `DraftTable` in this pass -- that table keys rows by `thread_id` only (no `topic_id` column), so
+ * reusing it as-is would collide with the parent conversation's own voice-note draft on the same
+ * thread; a recording that's swiped-to-save-and-exit is simply lost, same as the compose text box,
+ * which also has no persisted draft today.
  *
  * Isolation note: this reads/instantiates shared rendering and input classes (`ConversationAdapter`,
  * `ColorizerV1`, `RecyclerViewColorizer`, `ChatWallpaperDimLevelUtil`, `InputPanel`,
- * `MediaSelectionActivity`) but doesn't modify any of them, and nothing outside `conversation.topics`
- * references this screen's classes.
+ * `MediaSelectionActivity`, `VoiceMessageRecordingDelegate`, `VoiceNoteMediaController`) but doesn't
+ * modify any of them, and nothing outside `conversation.topics` references this screen's classes.
  */
-class TopicThreadActivity : PassphraseRequiredActivity() {
+class TopicThreadActivity : PassphraseRequiredActivity(), VoiceNoteMediaControllerOwner {
 
   companion object {
     private const val EXTRA_THREAD_ID = "thread_id"
     private const val EXTRA_TOPIC_ID = "topic_id"
+    private const val VOICE_RECORDING_HOST_FRAGMENT_TAG = "topic_voice_recording_host"
 
     @JvmStatic
     fun createIntent(context: Context, threadId: Long, topicId: Long): Intent {
@@ -107,9 +125,13 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
   private lateinit var composeText: ComposeText
   private lateinit var sendButton: SendButton
   private lateinit var buttonToggle: AnimatingToggle
+  private lateinit var quickAttachmentToggle: HidingLinearLayout
   private lateinit var root: InputAwareConstraintLayout
+  private lateinit var voiceMessageRecordingDelegate: VoiceMessageRecordingDelegate
   private var firstRender = true
   private var hasWallpaper = false
+
+  override val voiceNoteMediaController = VoiceNoteMediaController(this, true)
 
   private val mediaSelectionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
     if (result.resultCode == Activity.RESULT_OK) {
@@ -145,11 +167,19 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
     composeText = inputPanel.findViewById(R.id.embedded_text_editor)
     sendButton = inputPanel.findViewById(R.id.send_button)
     buttonToggle = inputPanel.findViewById(R.id.button_toggle)
+    quickAttachmentToggle = inputPanel.findViewById(R.id.quick_attachment_toggle)
 
-    // InputPanel wires emoji/quick-camera clicks and voice-note-draft callbacks straight to
-    // its Listener, so setListener must be called even though none of those apply yet for a
-    // text-only (Phase B1) compose bar -- otherwise those clicks NPE.
-    inputPanel.setListener(NoOpInputPanelListener())
+    val voiceRecordingHostFragment = TopicVoiceRecordingHostFragment()
+    supportFragmentManager.beginTransaction().add(voiceRecordingHostFragment, VOICE_RECORDING_HOST_FRAGMENT_TAG).commitNow()
+    voiceMessageRecordingDelegate = VoiceMessageRecordingDelegate(
+      voiceRecordingHostFragment,
+      AudioRecorder(this, inputPanel),
+      TopicVoiceMessageRecordingSessionCallback()
+    )
+
+    // InputPanel wires emoji/quick-camera/mic clicks and voice-note-draft callbacks straight to
+    // its Listener, so setListener must be called -- otherwise those clicks NPE.
+    inputPanel.setListener(TopicInputPanelListener())
 
     toolbar.setNavigationOnClickListener { finish() }
     toolbar.inflateMenu(R.menu.topic_thread)
@@ -170,16 +200,15 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
     composeText.addTextChangedListener(object : TextWatcher {
       override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
       override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-      override fun afterTextChanged(s: Editable?) {
-        if (s.isNullOrBlank()) {
-          buttonToggle.displayQuick(inputPanel.findViewById(R.id.attach_button))
-        } else {
-          buttonToggle.displayQuick(sendButton)
-        }
-      }
+      override fun afterTextChanged(s: Editable?) = updateComposeToggleState()
     })
 
     sendButton.setOnClickListener {
+      if (inputPanel.isRecordingInLockedMode) {
+        inputPanel.releaseRecordingLockAndSend()
+        return@setOnClickListener
+      }
+
       val text = composeText.textTrimmed.toString()
       if (text.isNotBlank()) {
         viewModel.sendMessage(text)
@@ -226,7 +255,7 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
       this,
       Glide.with(this),
       Locale.getDefault(),
-      TopicItemClickListener(onItemClicked = {}),
+      TopicItemClickListener(voiceNoteMediaController = voiceNoteMediaController, onItemClicked = {}),
       threadRecipient.hasWallpaper,
       ColorizerV1()
     )
@@ -310,6 +339,12 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
     mediaSelectionLauncher.launch(intent)
   }
 
+  private fun launchCamera() {
+    val recipient = viewModel.threadRecipient
+    val intent = MediaSelectionActivity.camera(this, MessageSendType.SignalMessageSendType, recipient.id, false)
+    mediaSelectionLauncher.launch(intent)
+  }
+
   private fun launchMediaEditor(media: Media) {
     val recipient = viewModel.threadRecipient
     val intent = MediaSelectionActivity.editor(this, MessageSendType.SignalMessageSendType, listOf(media), recipient.id, composeText.textTrimmed)
@@ -361,19 +396,81 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
     composeText.setText("")
   }
 
+  /**
+   * Mirrors [org.thoughtcrime.securesms.conversation.v2.ConversationFragment]'s own
+   * `updateToggleButtonState()`, simplified: topic threads have no edit-message mode and no
+   * persisted voice-note draft state to prioritize, so the only two states are "recording locked"
+   * (mic swiped up-and-locked, hands-free) and the ordinary blank/non-blank compose text split.
+   */
+  private fun updateComposeToggleState() {
+    when {
+      inputPanel.isRecordingInLockedMode -> {
+        buttonToggle.displayQuick(sendButton)
+        quickAttachmentToggle.show()
+      }
+      composeText.textTrimmed.isBlank() -> {
+        buttonToggle.displayQuick(inputPanel.findViewById(R.id.attach_button))
+        quickAttachmentToggle.show()
+      }
+      else -> {
+        buttonToggle.displayQuick(sendButton)
+        quickAttachmentToggle.hide(true)
+      }
+    }
+  }
+
   private inner class TopicAttachmentFragmentCreator : InputAwareConstraintLayout.FragmentCreator {
     override val id: Int = 1
     override fun create(): Fragment = TopicAttachmentKeyboardFragment.create(hasWallpaper)
   }
 
-  private inner class NoOpInputPanelListener : InputPanel.Listener {
-    override fun onRecorderStarted() = Unit
-    override fun onRecorderLocked() = Unit
-    override fun onRecorderSaveDraft() = Unit
-    override fun onRecorderFinished() = Unit
-    override fun onRecorderCanceled(byUser: Boolean) = Unit
-    override fun onRecorderPermissionRequired() = Unit
-    override fun onRecorderAlreadyInUse() = Unit
+  private inner class TopicInputPanelListener : InputPanel.Listener {
+    override fun onRecorderStarted() {
+      voiceMessageRecordingDelegate.onRecorderStarted()
+    }
+
+    override fun onRecorderLocked() {
+      updateComposeToggleState()
+      voiceMessageRecordingDelegate.onRecorderLocked()
+    }
+
+    override fun onRecorderSaveDraft() {
+      voiceMessageRecordingDelegate.onRecordSaveDraft()
+    }
+
+    override fun onRecorderFinished() {
+      updateComposeToggleState()
+      voiceMessageRecordingDelegate.onRecorderFinished()
+    }
+
+    override fun onRecorderCanceled(byUser: Boolean) {
+      voiceMessageRecordingDelegate.onRecorderCanceled(byUser)
+    }
+
+    override fun onRecorderPermissionRequired() {
+      Permissions.with(this@TopicThreadActivity)
+        .request(Manifest.permission.RECORD_AUDIO)
+        .ifNecessary()
+        .withRationaleDialog(
+          getString(R.string.ConversationActivity_allow_access_microphone),
+          getString(R.string.ConversationActivity_to_send_voice_messages_allow_signal_access_to_your_microphone),
+          R.drawable.ic_mic_24
+        )
+        .withPermanentDenialDialog(
+          getString(R.string.ConversationActivity_signal_requires_the_microphone_permission_in_order_to_send_audio_messages),
+          null,
+          R.string.ConversationActivity_allow_access_microphone,
+          R.string.ConversationActivity_signal_to_send_audio_messages,
+          supportFragmentManager
+        )
+        .onAnyDenied { Toast.makeText(this@TopicThreadActivity, R.string.ConversationActivity_signal_needs_microphone_access_voice_message, Toast.LENGTH_LONG).show() }
+        .execute()
+    }
+
+    override fun onRecorderAlreadyInUse() {
+      Toast.makeText(this@TopicThreadActivity, R.string.ConversationFragment_cannot_record_voice_message_during_call, Toast.LENGTH_SHORT).show()
+    }
+
     override fun onEmojiToggle() = Unit
     override fun onLinkPreviewCanceled() = Unit
     override fun onStickerSuggestionSelected(sticker: StickerRecord) = Unit
@@ -382,10 +479,30 @@ class TopicThreadActivity : PassphraseRequiredActivity() {
     override fun onQuoteClicked(quoteId: Long, authorId: RecipientId) = Unit
     override fun onEnterEditMode() = Unit
     override fun onExitEditMode() = Unit
-    override fun onQuickCameraToggleClicked() = Unit
+
+    override fun onQuickCameraToggleClicked() {
+      launchCamera()
+    }
+
     override fun onVoiceNoteDraftPlay(audioUri: Uri, progress: Double) = Unit
     override fun onVoiceNoteDraftPause(audioUri: Uri) = Unit
     override fun onVoiceNoteDraftSeekTo(audioUri: Uri, progress: Double) = Unit
     override fun onVoiceNoteDraftDelete(audioUri: Uri) = Unit
+  }
+
+  private inner class TopicVoiceMessageRecordingSessionCallback : VoiceMessageRecordingDelegate.SessionCallback {
+    override fun onSessionWillBegin() {
+      voiceNoteMediaController.pausePlayback()
+    }
+
+    override fun sendVoiceNote(draft: VoiceNoteDraft) {
+      val audioSlide = AudioSlide(draft.uri, draft.size, MediaUtil.AUDIO_AAC, true)
+      viewModel.sendMessage("", slideDeck = SlideDeck().apply { addSlide(audioSlide) })
+    }
+
+    // Voice-note drafts aren't persisted for topic threads in this pass (see the class doc) --
+    // a save-and-exit or an interruption-triggered save both just let the recording go.
+    override fun cancelEphemeralVoiceNoteDraft(draft: VoiceNoteDraft) = Unit
+    override fun saveEphemeralVoiceNoteDraft(draft: VoiceNoteDraft) = Unit
   }
 }
