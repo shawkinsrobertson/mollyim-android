@@ -60,7 +60,8 @@ data class OutgoingMessage(
   val isUnblocked: Boolean = false,
   val poll: Poll? = null,
   val messageExtras: MessageExtras? = null,
-  val isSelfGroupAdd: Boolean = false
+  val isSelfGroupAdd: Boolean = false,
+  val topicId: String? = null // topic_uuid (wire identity), not MessageTable's local topic row id
 ) {
 
   val isV2Group: Boolean = messageGroupContext != null && GroupV2UpdateMessageUtil.isGroupV2(messageGroupContext)

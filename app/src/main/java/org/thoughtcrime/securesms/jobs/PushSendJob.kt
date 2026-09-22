@@ -34,6 +34,7 @@ import org.thoughtcrime.securesms.database.SignalDatabase.Companion.threads
 import org.thoughtcrime.securesms.database.model.Mention
 import org.thoughtcrime.securesms.database.model.MmsMessageRecord
 import org.thoughtcrime.securesms.database.model.databaseprotos.BodyRangeList
+import org.thoughtcrime.securesms.database.model.databaseprotos.TopicUpdate
 import org.thoughtcrime.securesms.dependencies.AppDependencies
 import org.thoughtcrime.securesms.events.PartProgressEvent
 import org.thoughtcrime.securesms.jobmanager.JobManager
@@ -529,6 +530,30 @@ abstract class PushSendJob protected constructor(parameters: Parameters) : BaseJ
       )
     }
   }
+
+  protected fun getTopicContext(message: OutgoingMessage): SignalServiceDataMessage.TopicContext? {
+    val topicUpdate = message.messageExtras?.topicUpdate ?: return null
+
+    val action = when (topicUpdate.kind) {
+      TopicUpdate.Kind.STARTED -> SignalServiceDataMessage.TopicContextAction.CREATE
+      TopicUpdate.Kind.RENAMED -> SignalServiceDataMessage.TopicContextAction.RENAME
+      TopicUpdate.Kind.DELETED -> SignalServiceDataMessage.TopicContextAction.DELETE
+    }
+
+    val sourceMessages = topicUpdate.sourceMessages.mapNotNull { source ->
+      val serviceId = ServiceId.parseOrNull(source.authorAci) ?: return@mapNotNull null
+      SignalServiceDataMessage.AddressableSourceMessage(authorServiceId = serviceId, sentTimestamp = source.sentTimestamp)
+    }
+
+    return SignalServiceDataMessage.TopicContext(
+      topicId = topicUpdate.topicUuid,
+      action = action,
+      name = topicUpdate.name.takeIf { it.isNotEmpty() },
+      sourceMessages = sourceMessages
+    )
+  }
+
+  protected fun getTopicId(message: OutgoingMessage): String? = message.topicId
 
   protected fun buildAttachmentString(attachments: List<Attachment>): String {
     return attachments.joinToString(", ") { attachment ->

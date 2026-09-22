@@ -100,6 +100,7 @@ import org.whispersystems.signalservice.api.util.CredentialsProvider;
 import org.whispersystems.signalservice.api.websocket.WebSocketUnavailableException;
 import org.whispersystems.signalservice.internal.crypto.AttachmentDigest;
 import org.whispersystems.signalservice.internal.crypto.PaddingInputStream;
+import org.whispersystems.signalservice.internal.push.AddressableMessage;
 import org.whispersystems.signalservice.internal.push.AttachmentPointer;
 import org.whispersystems.signalservice.internal.push.BodyRange;
 import org.whispersystems.signalservice.internal.push.CallMessage;
@@ -1287,6 +1288,41 @@ public class SignalServiceMessageSender {
                                .targetAuthorAciBinary(adminDelete.getTargetAuthor().toByteString())
                                .targetSentTimestamp(adminDelete.getTargetSentTimestamp())
                                .build());
+    }
+
+    if (message.getTopicContext().isPresent()) {
+      SignalServiceDataMessage.TopicContext topicContext = message.getTopicContext().get();
+
+      DataMessage.TopicContext.Action action;
+      switch (topicContext.getAction()) {
+        case CREATE: action = DataMessage.TopicContext.Action.CREATE; break;
+        case RENAME: action = DataMessage.TopicContext.Action.RENAME; break;
+        case DELETE: action = DataMessage.TopicContext.Action.DELETE; break;
+        default:     throw new AssertionError();
+      }
+
+      DataMessage.TopicContext.Builder topicContextBuilder = new DataMessage.TopicContext.Builder()
+                                                                   .topicId(topicContext.getTopicId())
+                                                                   .action(action);
+
+      if (topicContext.getName() != null) {
+        topicContextBuilder.name(topicContext.getName());
+      }
+
+      List<AddressableMessage> sourceMessages = new LinkedList<>();
+      for (SignalServiceDataMessage.AddressableSourceMessage sourceMessage : topicContext.getSourceMessages()) {
+        sourceMessages.add(new AddressableMessage.Builder()
+                                .authorServiceIdBinary(sourceMessage.getAuthorServiceId().toByteString())
+                                .sentTimestamp(sourceMessage.getSentTimestamp())
+                                .build());
+      }
+      topicContextBuilder.sourceMessages(sourceMessages);
+
+      builder.topicContext(topicContextBuilder.build());
+    }
+
+    if (message.getTopicId().isPresent()) {
+      builder.topicId(message.getTopicId().get());
     }
 
     builder.timestamp(message.getTimestamp());
