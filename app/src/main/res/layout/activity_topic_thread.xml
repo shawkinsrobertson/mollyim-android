@@ -1,24 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<org.thoughtcrime.securesms.components.InputAwareConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
-    tools:viewBindingIgnore="true"
+    android:id="@+id/topic_thread_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical">
+    app:animateKeyboardChanges="true">
+
+    <include layout="@layout/system_ui_guidelines" />
 
     <androidx.appcompat.widget.Toolbar
         android:id="@+id/topic_thread_toolbar"
-        android:layout_width="match_parent"
+        android:layout_width="0dp"
         android:layout_height="@dimen/signal_m3_toolbar_height"
         android:minHeight="@dimen/signal_m3_toolbar_height"
         app:navigationIcon="@drawable/symbol_arrow_start_24"
-        app:titleTextAppearance="@style/Signal.Text.TitleLarge" />
+        app:titleTextAppearance="@style/Signal.Text.TitleLarge"
+        app:layout_constraintEnd_toEndOf="@id/parent_end_guideline"
+        app:layout_constraintStart_toStartOf="@id/parent_start_guideline"
+        app:layout_constraintTop_toTopOf="@id/status_bar_guideline" />
 
     <FrameLayout
-        android:layout_width="match_parent"
+        android:id="@+id/topic_thread_content_frame"
+        android:layout_width="0dp"
         android:layout_height="0dp"
-        android:layout_weight="1">
+        app:layout_constraintBottom_toTopOf="@id/topic_input_panel"
+        app:layout_constraintEnd_toEndOf="@id/parent_end_guideline"
+        app:layout_constraintStart_toStartOf="@id/parent_start_guideline"
+        app:layout_constraintTop_toBottomOf="@id/topic_thread_toolbar">
 
         <ImageView
             android:id="@+id/topic_thread_wallpaper"
@@ -44,34 +53,22 @@
 
     </FrameLayout>
 
-    <LinearLayout
-        android:layout_width="match_parent"
+    <include
+        android:id="@+id/topic_input_panel"
+        layout="@layout/conversation_input_panel"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingHorizontal="8dp"
-        android:paddingVertical="4dp">
+        app:layout_constraintBottom_toTopOf="@id/input_container"
+        app:layout_constraintEnd_toEndOf="@id/parent_end_guideline"
+        app:layout_constraintStart_toStartOf="@id/parent_start_guideline" />
 
-        <EditText
-            android:id="@+id/topic_thread_compose_text"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:background="@null"
-            android:hint="@string/ConversationTopics__message_hint"
-            android:inputType="textCapSentences|textMultiLine"
-            android:maxLines="6"
-            android:textAppearance="@style/Signal.Text.BodyLarge" />
+    <androidx.fragment.app.FragmentContainerView
+        android:id="@+id/input_container"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="@id/navigation_bar_guideline"
+        app:layout_constraintEnd_toEndOf="@id/parent_end_guideline"
+        app:layout_constraintStart_toStartOf="@id/parent_start_guideline"
+        app:layout_constraintTop_toTopOf="@id/keyboard_guideline" />
 
-        <ImageButton
-            android:id="@+id/topic_thread_send_button"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/conversation_activity__send"
-            android:src="@drawable/symbol_send_24"
-            app:tint="?attr/signal_icon_tint_primary" />
-
-    </LinearLayout>
-
-</LinearLayout>
+</org.thoughtcrime.securesms.components.InputAwareConstraintLayout>

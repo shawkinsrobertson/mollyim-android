@@ -19,6 +19,7 @@ import org.thoughtcrime.securesms.database.SignalDatabase
 import org.thoughtcrime.securesms.dependencies.AppDependencies
 import org.thoughtcrime.securesms.mms.OutgoingMessage
 import org.thoughtcrime.securesms.mms.QuoteModel
+import org.thoughtcrime.securesms.mms.SlideDeck
 import org.thoughtcrime.securesms.recipients.Recipient
 import org.thoughtcrime.securesms.sms.MessageSender
 import kotlin.time.Duration.Companion.seconds
@@ -61,9 +62,20 @@ class TopicThreadViewModel(private val threadId: Long, private val topicId: Long
     }
   }
 
-  fun sendMessage(body: String) {
+  /**
+   * @param slideDeck Attachments picked from the attachment sheet (Phase B2), not yet uploaded.
+   * Mutually exclusive with [preUploadResults] -- see [MessageSender.sendPushWithPreUploadedMedia]'s
+   * own precondition that a pre-uploaded send's [OutgoingMessage] carries no attachments.
+   * @param preUploadResults Media that started uploading speculatively while the user was still
+   * in the attachment/media-review screen (the normal fast-path for push media sends).
+   */
+  fun sendMessage(
+    body: String,
+    slideDeck: SlideDeck? = null,
+    preUploadResults: List<MessageSender.PreUploadResult> = emptyList()
+  ) {
     val trimmed = body.trim()
-    if (trimmed.isEmpty()) return
+    if (trimmed.isEmpty() && slideDeck?.containsMediaSlide() != true && preUploadResults.isEmpty()) return
 
     viewModelScope.launch {
       withContext(Dispatchers.IO) {
@@ -72,9 +84,17 @@ class TopicThreadViewModel(private val threadId: Long, private val topicId: Long
         val quote = anchor?.let { QuoteModel(it.dateSent, it.fromRecipient.id, it.body, false, null, null, QuoteModel.Type.NORMAL, it.messageRanges) }
 
         val outgoing = OutgoingMessage.text(threadRecipient, trimmed, threadRecipient.expiresInSeconds.seconds.inWholeMilliseconds)
-          .copy(topicId = topic.topicUuid, outgoingQuote = quote)
+          .copy(
+            topicId = topic.topicUuid,
+            outgoingQuote = quote,
+            attachments = if (preUploadResults.isEmpty()) slideDeck?.asAttachments() ?: emptyList() else emptyList()
+          )
 
-        MessageSender.send(AppDependencies.application, outgoing, threadId, MessageSender.SendType.SIGNAL, null, null)
+        if (preUploadResults.isEmpty()) {
+          MessageSender.send(AppDependencies.application, outgoing, threadId, MessageSender.SendType.SIGNAL, null, null)
+        } else {
+          MessageSender.sendPushWithPreUploadedMedia(AppDependencies.application, outgoing, preUploadResults, threadId) {}
+        }
       }
       refresh()
     }
