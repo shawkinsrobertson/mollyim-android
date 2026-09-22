@@ -169,13 +169,21 @@ class TopicThreadActivity : PassphraseRequiredActivity(), VoiceNoteMediaControll
     buttonToggle = inputPanel.findViewById(R.id.button_toggle)
     quickAttachmentToggle = inputPanel.findViewById(R.id.quick_attachment_toggle)
 
-    val voiceRecordingHostFragment = TopicVoiceRecordingHostFragment()
-    supportFragmentManager.beginTransaction().add(voiceRecordingHostFragment, VOICE_RECORDING_HOST_FRAGMENT_TAG).commitNow()
-    voiceMessageRecordingDelegate = VoiceMessageRecordingDelegate(
-      voiceRecordingHostFragment,
-      AudioRecorder(this, inputPanel),
-      TopicVoiceMessageRecordingSessionCallback()
-    )
+    // The fragment's view (and thus its viewLifecycleOwner, which the delegate's constructor
+    // reads) can't exist synchronously here -- see TopicVoiceRecordingHostFragment's doc comment.
+    // doOnReady defers the delegate's construction to onViewCreated, whenever that actually fires,
+    // and .commit() (not .commitNow()) lets the FragmentManager run the transaction once it's
+    // actually able to, rather than forcing immediate execution before it can.
+    val voiceRecordingHostFragment = TopicVoiceRecordingHostFragment().apply {
+      doOnReady { hostFragment ->
+        voiceMessageRecordingDelegate = VoiceMessageRecordingDelegate(
+          hostFragment,
+          AudioRecorder(this@TopicThreadActivity, inputPanel),
+          TopicVoiceMessageRecordingSessionCallback()
+        )
+      }
+    }
+    supportFragmentManager.beginTransaction().add(voiceRecordingHostFragment, VOICE_RECORDING_HOST_FRAGMENT_TAG).commit()
 
     // InputPanel wires emoji/quick-camera/mic clicks and voice-note-draft callbacks straight to
     // its Listener, so setListener must be called -- otherwise those clicks NPE.
