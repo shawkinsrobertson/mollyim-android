@@ -32,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.signal.core.models.media.Media
 import org.signal.core.ui.permissions.Permissions
+import org.signal.core.util.logging.Log
 import org.thoughtcrime.securesms.PassphraseRequiredActivity
 import org.thoughtcrime.securesms.R
 import org.thoughtcrime.securesms.audio.AudioRecorder
@@ -102,6 +103,7 @@ import java.util.Locale
 class TopicThreadActivity : PassphraseRequiredActivity(), VoiceNoteMediaControllerOwner {
 
   companion object {
+    private val TAG = Log.tag(TopicThreadActivity::class.java)
     private const val EXTRA_THREAD_ID = "thread_id"
     private const val EXTRA_TOPIC_ID = "topic_id"
     private const val VOICE_RECORDING_HOST_FRAGMENT_TAG = "topic_voice_recording_host"
@@ -146,28 +148,34 @@ class TopicThreadActivity : PassphraseRequiredActivity(), VoiceNoteMediaControll
   }
 
   override fun onCreate(savedInstanceState: Bundle?, ready: Boolean) {
+    Log.i(TAG, "onCreate: enter, ready=$ready, threadId=$threadId, topicId=$topicId")
     super.onCreate(savedInstanceState, ready)
 
     if (threadId == -1L || topicId == -1L) {
+      Log.w(TAG, "onCreate: invalid threadId/topicId, finishing")
       finish()
       return
     }
 
     setContentView(R.layout.activity_topic_thread)
+    Log.i(TAG, "onCreate: setContentView done, root childCount=${(findViewById<View>(R.id.topic_thread_root) as? android.view.ViewGroup)?.childCount}")
 
     root = findViewById(R.id.topic_thread_root)
     root.fragmentManager = supportFragmentManager
+    Log.i(TAG, "onCreate: root resolved, childCount=${root.childCount}")
 
     toolbar = findViewById(R.id.topic_thread_toolbar)
     recyclerView = findViewById(R.id.topic_thread_recycler)
     val wallpaperView: ImageView = findViewById(R.id.topic_thread_wallpaper)
     val wallpaperDimView: View = findViewById(R.id.topic_thread_wallpaper_dim)
+    Log.i(TAG, "onCreate: toolbar/recyclerView/wallpaper views resolved")
 
     inputPanel = findViewById(R.id.topic_input_panel)
     composeText = inputPanel.findViewById(R.id.embedded_text_editor)
     sendButton = inputPanel.findViewById(R.id.send_button)
     buttonToggle = inputPanel.findViewById(R.id.button_toggle)
     quickAttachmentToggle = inputPanel.findViewById(R.id.quick_attachment_toggle)
+    Log.i(TAG, "onCreate: inputPanel views resolved")
 
     // The fragment's view (and thus its viewLifecycleOwner, which the delegate's constructor
     // reads) can't exist synchronously here -- see TopicVoiceRecordingHostFragment's doc comment.
@@ -184,6 +192,7 @@ class TopicThreadActivity : PassphraseRequiredActivity(), VoiceNoteMediaControll
       }
     }
     supportFragmentManager.beginTransaction().add(voiceRecordingHostFragment, VOICE_RECORDING_HOST_FRAGMENT_TAG).commit()
+    Log.i(TAG, "onCreate: voice recording host fragment transaction committed (async)")
 
     // InputPanel wires emoji/quick-camera/mic clicks and voice-note-draft callbacks straight to
     // its Listener, so setListener must be called -- otherwise those clicks NPE.
@@ -241,15 +250,21 @@ class TopicThreadActivity : PassphraseRequiredActivity(), VoiceNoteMediaControll
     // dispatched by the framework *after* onCreate() returns -- so calling it synchronously here
     // (while still inside onCreate()) silently no-ops both the background and foreground task,
     // and setUpConversationUi() (which is what wires up the message-rendering collector) never runs.
+    Log.i(TAG, "onCreate: about to launch recipient-lookup coroutine, root childCount=${root.childCount}")
     lifecycleScope.launch {
+      Log.i(TAG, "onCreate coroutine: launched, about to query recipient")
       val threadRecipient = withContext(Dispatchers.IO) {
         SignalDatabase.threads.getRecipientForThreadId(threadId)!!
       }
+      Log.i(TAG, "onCreate coroutine: recipient resolved (${threadRecipient.id}), calling setUpConversationUi")
       setUpConversationUi(threadRecipient, wallpaperView, wallpaperDimView)
+      Log.i(TAG, "onCreate coroutine: setUpConversationUi returned, root childCount=${root.childCount}")
     }
+    Log.i(TAG, "onCreate: exit (coroutine launched, not yet run)")
   }
 
   private fun setUpConversationUi(threadRecipient: Recipient, wallpaperView: ImageView, wallpaperDimView: View) {
+    Log.i(TAG, "setUpConversationUi: enter")
     hasWallpaper = threadRecipient.hasWallpaper
 
     val chatWallpaper = threadRecipient.wallpaper
@@ -271,12 +286,16 @@ class TopicThreadActivity : PassphraseRequiredActivity(), VoiceNoteMediaControll
     recyclerView.layoutManager = SmoothScrollingLinearLayoutManager(this, true)
     recyclerView.adapter = adapter
     recyclerView.itemAnimator = null
+    Log.i(TAG, "setUpConversationUi: adapter attached to recyclerView")
 
     RecyclerViewColorizer(recyclerView).setChatColors(threadRecipient.chatColors)
 
     lifecycleScope.launch {
+      Log.i(TAG, "setUpConversationUi: uiState collector coroutine launched")
       repeatOnLifecycle(Lifecycle.State.STARTED) {
+        Log.i(TAG, "setUpConversationUi: repeatOnLifecycle(STARTED) block entered")
         viewModel.uiState.collect { state ->
+          Log.i(TAG, "setUpConversationUi: uiState emitted, messages=${state.messages.size}, topicName=${state.topicName}")
           toolbar.title = state.topicName
 
           adapter.submitList(state.messages) {
