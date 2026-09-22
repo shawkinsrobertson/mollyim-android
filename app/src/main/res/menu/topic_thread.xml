@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:id="@+id/menu_rename_topic"
+          android:title="@string/ConversationTopics__rename_topic"
+          android:showAsAction="never" />
+
+    <item android:id="@+id/menu_delete_topic"
+          android:title="@string/ConversationTopics__delete_topic"
+          android:showAsAction="never" />
+
+</menu>

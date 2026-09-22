@@ -109,7 +109,6 @@ import org.thoughtcrime.securesms.database.model.StoryResult
 import org.thoughtcrime.securesms.database.model.StoryType
 import org.thoughtcrime.securesms.database.model.StoryType.Companion.fromCode
 import org.thoughtcrime.securesms.database.model.StoryViewState
-import org.thoughtcrime.securesms.database.model.TopicMessage
 import org.thoughtcrime.securesms.database.model.TopicRecord
 import org.thoughtcrime.securesms.database.model.databaseprotos.AdminDeleteStatus
 import org.thoughtcrime.securesms.database.model.databaseprotos.BodyRangeList
@@ -1263,27 +1262,21 @@ open class MessageTable(context: Context?, databaseHelper: SignalDatabase) : Dat
   }
 
   /**
-   * All messages owned by a topic (see [TOPIC_ID]), oldest first. A minimal,
-   * self-contained query rather than routing through the general-purpose
-   * [MmsReader]/[MessageRecord] deserialization pipeline -- see
-   * docs/topic-threads-design.md and the Phase 1 PR notes for why that
-   * pipeline is deliberately left untouched for now.
+   * A cursor of all messages owned by a topic (see [TOPIC_ID]), in the same
+   * order/shape [getConversation] returns for a whole thread (newest first,
+   * [MMS_PROJECTION], readable via [mmsReaderFor]) -- so a topic's messages
+   * can be run through the exact same [MessageDataFetcher]/
+   * [ConversationMessage] pipeline the main conversation screen uses,
+   * rather than a bespoke read path. See docs/topic-threads-design.md and
+   * the "full parity" PR notes.
    */
-  fun getTopicMessages(topicId: Long): List<TopicMessage> {
+  fun getTopicConversation(topicId: Long): Cursor {
     return readableDatabase
-      .select(ID, FROM_RECIPIENT_ID, BODY, DATE_SENT)
+      .select(*MMS_PROJECTION)
       .from(TABLE_NAME)
       .where("$TOPIC_ID = ?", topicId)
-      .orderBy("$DATE_SENT ASC")
+      .orderBy("$DATE_RECEIVED DESC")
       .run()
-      .readToList { cursor ->
-        TopicMessage(
-          id = cursor.requireLong(ID),
-          fromRecipientId = RecipientId.from(cursor.requireLong(FROM_RECIPIENT_ID)),
-          body = cursor.requireString(BODY) ?: "",
-          dateSent = cursor.requireLong(DATE_SENT)
-        )
-      }
   }
 
   // endregion Topic threads
